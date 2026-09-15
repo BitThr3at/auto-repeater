@@ -3,12 +3,20 @@ package burp.Highlighter;
 import burp.AutoRepeater;
 import burp.AutoRepeater.LogTable;
 import burp.BurpExtender;
+import burp.Utils.Utils;
 import burp.Logs.LogEntry;
 import burp.Logs.LogManager;
+import java.awt.Color;
 import java.awt.Component;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import javax.swing.BoxLayout;
+import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import javax.swing.DefaultComboBoxModel;
 import javax.swing.DefaultListCellRenderer;
 import javax.swing.JButton;
@@ -46,37 +54,95 @@ public class Highlighters {
   private LogManager logManager;
   private LogTable logTable;
 
+  /** Re-highlighting every log entry re-reads every request/response, so requests are coalesced. */
+  private static final int REHIGHLIGHT_DELAY_MS = 250;
+
+  private final Timer rehighlightTimer;
+  private final ExecutorService rehighlightExecutor = Executors.newSingleThreadExecutor(runnable -> {
+    Thread thread = new Thread(runnable, "AutoRepeater-highlighter");
+    thread.setDaemon(true);
+    return thread;
+  });
+
   public Highlighters(LogManager logManager, LogTable logTable) {
     highlighterUITableModel = new HighlighterUITableModel();
     highlighterUITableModel.addTableModelListener(l -> highlight());
     this.logManager = logManager;
     this.logTable = logTable;
+    rehighlightTimer = new Timer(REHIGHLIGHT_DELAY_MS, e -> rehighlightAll());
+    rehighlightTimer.setRepeats(false);
     highlightsPanel = createMenuUI();
   }
 
   public HighlighterUITableModel getHighlighterUITableModel() { return highlighterUITableModel; }
   public JPanel getUI() { return highlightsPanel; }
 
+  /**
+   * Schedules a re-highlight of every log entry. Editing a highlighter used to fire this on every
+   * keystroke and each call walked the whole log on the event thread.
+   */
   public void highlight() {
-    for (LogEntry logEntry : logManager.getLogTableModel().getLog()) {
-      highlight(logEntry);
-    }
-    logTable.repaint();
+    rehighlightTimer.restart();
   }
 
-  public void highlight(LogEntry logEntry) {
-    logEntry.setBackgroundColor(Highlighter.COLORS[0], Highlighter.SELECTED_COLORS[0]);
-    for (HighlighterTableModel highlighterTableModel : highlighterUITableModel.getTableModels()) {
-      if (highlighterTableModel.isEnabled()) {
-        for (Highlighter highlighter : highlighterTableModel.getHighlighters()) {
-          if (highlighter.isEnabled() && highlighter.checkCondition(logEntry)) {
-            logEntry.setBackgroundColor(
-                highlighterTableModel.getColor(), highlighterTableModel.getSelectedColor());
-          }
+  private void rehighlightAll() {
+    final List<LogEntry> entries = new ArrayList<>(logManager.getLogTableModel().getLog());
+    final List<HighlightRule> rules = snapshotRules();
+    rehighlightExecutor.submit(() -> {
+      for (LogEntry logEntry : entries) {
+        applyRules(logEntry, rules);
+      }
+      SwingUtilities.invokeLater(logTable::repaint);
+    });
+  }
+
+  /**
+   * Highlights a single entry. Does not repaint: callers that add entries repaint once per batch.
+   */
+  public void applyHighlights(LogEntry logEntry) {
+    applyRules(logEntry, snapshotRules());
+  }
+
+  private void applyRules(LogEntry logEntry, List<HighlightRule> rules) {
+    Color background = Highlighter.COLORS[0];
+    Color selectedBackground = Highlighter.SELECTED_COLORS[0];
+    for (HighlightRule rule : rules) {
+      for (Highlighter highlighter : rule.highlighters) {
+        if (highlighter.isEnabled() && highlighter.checkCondition(logEntry)) {
+          background = rule.color;
+          selectedBackground = rule.selectedColor;
+          break;
         }
       }
     }
-    logTable.repaint();
+    logEntry.setBackgroundColor(background, selectedBackground);
+  }
+
+  /** Copy of the enabled highlighter configuration, so matching can run off the event thread. */
+  private List<HighlightRule> snapshotRules() {
+    List<HighlightRule> rules = new ArrayList<>();
+    for (HighlighterTableModel tableModel
+        : new ArrayList<>(highlighterUITableModel.getTableModels())) {
+      if (tableModel.isEnabled()) {
+        rules.add(new HighlightRule(
+            tableModel.getColor(),
+            tableModel.getSelectedColor(),
+            new ArrayList<>(tableModel.getHighlighters())));
+      }
+    }
+    return rules;
+  }
+
+  private static final class HighlightRule {
+    final Color color;
+    final Color selectedColor;
+    final List<Highlighter> highlighters;
+
+    HighlightRule(Color color, Color selectedColor, List<Highlighter> highlighters) {
+      this.color = color;
+      this.selectedColor = selectedColor;
+      this.highlighters = highlighters;
+    }
   }
 
   private JPanel createMenuUI() {
@@ -88,10 +154,11 @@ public class Highlighters {
     JPanel buttonsPanel = new JPanel();
     JTable menuTable = new JTable(highlighterUITableModel);
 
-    menuTable.getColumnModel().getColumn(0).setMaxWidth(55);
-    menuTable.getColumnModel().getColumn(0).setMinWidth(55);
-    menuTable.getColumnModel().getColumn(1).setMaxWidth(70);
-    menuTable.getColumnModel().getColumn(1).setMinWidth(70);
+    menuTable.getColumnModel().getColumn(0).setMaxWidth(60);
+    menuTable.getColumnModel().getColumn(0).setMinWidth(60);
+    menuTable.getColumnModel().getColumn(1).setMaxWidth(80);
+    menuTable.getColumnModel().getColumn(1).setMinWidth(80);
+    Utils.configureConfigurationTable(menuTable, 60, 80, 300);
     //menuTable.getColumnModel().getColumn(2).setPreferredWidth(20);
 
     menuTable.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
@@ -100,17 +167,16 @@ public class Highlighters {
           JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
         Component c =
             super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-        // Only color the color column
+        // Only the colour column is painted with the highlighter colour; the rest follow the look
+        // and feel, which used to be hard-coded white and unreadable on the dark themes.
         if (column == 1) {
-          c.setBackground(highlighterUITableModel.getTableModels().get(row).getColor());
-          if (isSelected) {
-            c.setBackground(highlighterUITableModel.getTableModels().get(row).getSelectedColor());
-          }
+          HighlighterTableModel model = highlighterUITableModel.getTableModels().get(row);
+          Color background = isSelected ? model.getSelectedColor() : model.getColor();
+          c.setBackground(background);
+          c.setForeground(Utils.getContrastingForeground(background));
         } else {
-          c.setBackground(Highlighter.COLORS[0]);
-          if (isSelected) {
-            c.setBackground(Highlighter.SELECTED_COLORS[0]);
-          }
+          c.setBackground(isSelected ? table.getSelectionBackground() : table.getBackground());
+          c.setForeground(isSelected ? table.getSelectionForeground() : table.getForeground());
         }
         return c;
       }
@@ -234,8 +300,9 @@ public class Highlighters {
     commentTextFieldLabel.setPreferredSize(AutoRepeater.buttonDimension);
 
     highlighterTable = new JTable(highlighterTableModel);
-    highlighterTable.getColumnModel().getColumn(0).setMaxWidth(55);
-    highlighterTable.getColumnModel().getColumn(0).setMinWidth(55);
+    highlighterTable.getColumnModel().getColumn(0).setMaxWidth(60);
+    highlighterTable.getColumnModel().getColumn(0).setMinWidth(60);
+    Utils.configureConfigurationTable(highlighterTable, 60, 90, 130, 140, 150, 220);
 
     JLabel colorComboBoxLabel = new JLabel("Highlight Color: ");
     JComboBox<String> colorComboBox = new JComboBox<>(Highlighter.COLOR_NAMES);

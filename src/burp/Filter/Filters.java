@@ -4,6 +4,7 @@ import burp.AutoRepeater;
 import burp.BurpExtender;
 import burp.Logs.LogEntry;
 import burp.Logs.LogManager;
+import burp.Utils.Utils;
 import java.awt.Color;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
@@ -245,12 +246,9 @@ public class Filters {
 
     filterTableModel = new FilterTableModel();
     filterTable = new JTable(filterTableModel);
-    filterTable.getColumnModel().getColumn(0).setMinWidth(55);
-    filterTable.getColumnModel().getColumn(0).setMaxWidth(55);
-
-    filterTable.setPreferredSize(AutoRepeater.tableDimension);
-    filterTable.setMaximumSize(AutoRepeater.tableDimension);
-    filterTable.setMinimumSize(AutoRepeater.tableDimension);
+    filterTable.getColumnModel().getColumn(0).setMinWidth(60);
+    filterTable.getColumnModel().getColumn(0).setMaxWidth(60);
+    Utils.configureConfigurationTable(filterTable, 60, 90, 130, 140, 150, 220);
 
     filterScrollPane = new JScrollPane(filterTable);
 

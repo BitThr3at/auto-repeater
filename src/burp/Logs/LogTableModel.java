@@ -3,6 +3,8 @@ package burp.Logs;
 import burp.Filter.Filters;
 import javax.swing.table.AbstractTableModel;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 public class LogTableModel extends AbstractTableModel {
 
@@ -15,26 +17,43 @@ public class LogTableModel extends AbstractTableModel {
   }
 
   public void addLogEntry(LogEntry logEntry, Filters filters) {
-    log.add(logEntry);
-    if(filters.filter(logEntry)) {
-      filteredLogs.add(logEntry);
-      int currRowIndex = filteredLogs.size() - 1;
-      fireTableRowsInserted(currRowIndex,currRowIndex);
-    }
+    addLogEntries(
+        Collections.singletonList(logEntry),
+        filters.filter(logEntry)
+            ? Collections.singletonList(logEntry)
+            : Collections.<LogEntry>emptyList());
   }
 
-  public void filterLogs(Filters filters) {
-    filteredLogs = new ArrayList<>();
-    for (LogEntry logEntry : log) {
-      if(filters.filter(logEntry)) {
-        filteredLogs.add(logEntry);
-        //System.out.println("Adding row "+logEntry.getRequestResponseId());
-        fireTableDataChanged();
+  /**
+   * Adds a batch of entries with a single table event. One event per entry meant the row sorter
+   * re-sorted the whole table for every request. visibleEntries is the subset that passes the log
+   * filters, already determined off the event thread.
+   */
+  public void addLogEntries(List<LogEntry> logEntries, List<LogEntry> visibleEntries) {
+    log.addAll(logEntries);
+    if (visibleEntries.isEmpty()) {
+      return;
+    }
+    int firstNewRow = filteredLogs.size();
+    filteredLogs.addAll(visibleEntries);
+    fireTableRowsInserted(firstNewRow, filteredLogs.size() - 1);
+  }
+
+  /**
+   * Installs a filtered view computed on a background thread. Entries logged while that was running
+   * are filtered here; there are only ever a handful of them.
+   */
+  public void replaceFilteredLogs(
+      ArrayList<LogEntry> visibleEntries, int filteredThroughIndex, Filters filters) {
+    for (int i = filteredThroughIndex; i < log.size(); i++) {
+      LogEntry logEntry = log.get(i);
+      if (filters.filter(logEntry)) {
+        visibleEntries.add(logEntry);
       }
     }
+    filteredLogs = visibleEntries;
+    // One event for the whole re-filter instead of one per matching row.
     fireTableDataChanged();
-    //new Thread(() -> {
-    //}).start();
   }
 
   public void clearLogs() {
@@ -132,7 +151,7 @@ public class LogTableModel extends AbstractTableModel {
       case 1:
         return logEntry.getModifiedMethod();
       case 2:
-        return logEntry.getModifiedURL().toString();
+        return logEntry.getModifiedUrlString();
       case 3:
         return logEntry.getOriginalResponseStatus();
       case 4:

@@ -18,7 +18,7 @@ import java.util.ArrayList;
 
 public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
   private final JRootPane rootPane;
-  private static ArrayList<AutoRepeater> autoRepeaters;
+  private static java.util.List<AutoRepeater> autoRepeaters;
 
   private static JMenu autoRepeaterJMenu;
   private static JMenuItem toggleSettingsVisibility;
@@ -161,10 +161,10 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
       AutoRepeater autoRepeater = BurpExtender.getSelectedAutoRepeater();
       LogManager logManager = autoRepeater.getLogManager();
       File file = exportLogsPathChooser.getSelectedFile();
-      ArrayList<LogEntry> logEntries = new ArrayList<>();
+      final ArrayList<LogEntry> logEntries = new ArrayList<>();
       // collect relevant entries
       if ((exportWhichComboBox.getSelectedItem()).equals("All Tab Logs")) {
-        logEntries = autoRepeater.getLogTableModel().getLog();
+        logEntries.addAll(autoRepeater.getLogTableModel().getLog());
       } else if ((exportWhichComboBox.getSelectedItem()).equals("Selected Tab Logs")) {
         int[] selectedRows = autoRepeater.getLogTable().getSelectedRows();
         for (int row : selectedRows) {
@@ -172,17 +172,25 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
         }
       }
       // determine if whole request should be exported or just the log contents
-      boolean exportFullHttp = !((exportValueComboBox.getSelectedItem()).equals("Log Entry"));
+      final boolean exportFullHttp = !((exportValueComboBox.getSelectedItem()).equals("Log Entry"));
+      final boolean exportCsv = (exportTypeComboBox.getSelectedItem()).equals("CSV");
 
-      try (PrintWriter out = new PrintWriter(file.getAbsolutePath())) {
-        if ((exportTypeComboBox.getSelectedItem()).equals("CSV")) {
-          out.println(Utils.exportLogEntriesToCsv(logEntries, exportFullHttp));
-        } else if ((exportTypeComboBox.getSelectedItem()).equals("JSON")) {
-          out.println(Utils.exportLogEntriesToJson(logEntries, exportFullHttp));
+      // Serialising the log reads every request and response back from disk, so it must not run on
+      // the event thread: exporting a few hundred entries froze Burp until it finished.
+      Thread exportThread = new Thread(() -> {
+        try (PrintWriter out = new PrintWriter(file.getAbsolutePath())) {
+          out.println(exportCsv
+              ? Utils.exportLogEntriesToCsv(logEntries, exportFullHttp)
+              : Utils.exportLogEntriesToJson(logEntries, exportFullHttp));
+          BurpExtender.getCallbacks().printOutput(
+              "Exported " + logEntries.size() + " log entries to " + file.getAbsolutePath());
+        } catch (FileNotFoundException error) {
+          BurpExtender.getCallbacks().printError(
+              "Could not write " + file.getAbsolutePath() + ": " + error.getMessage());
         }
-      } catch (FileNotFoundException error) {
-        error.printStackTrace();
-      }
+      }, "AutoRepeater-export");
+      exportThread.setDaemon(true);
+      exportThread.start();
     }
   }
 

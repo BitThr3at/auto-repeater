@@ -17,8 +17,10 @@ import burp.Logs.LogTableModel;
 import burp.Replacements.Replacement;
 import burp.Replacements.ReplacementTableModel;
 import burp.Replacements.Replacements;
+import burp.Utils.AutoRepeaterMenu;
 import burp.Utils.DiffViewerPane;
 import burp.Utils.HttpComparer;
+import burp.Utils.StyledDiffDocument;
 import burp.Utils.Utils;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -28,12 +30,25 @@ import com.google.gson.JsonObject;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.regex.PatternSyntaxException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.swing.*;
 import javax.swing.border.Border;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.TableModel;
+import javax.swing.table.TableRowSorter;
+import javax.swing.text.StyledDocument;
 
 public class AutoRepeater implements IMessageEditorController {
 
@@ -41,13 +56,15 @@ public class AutoRepeater implements IMessageEditorController {
   public static final int TEXT_HEIGHT = new JTextField().getPreferredSize().height;
   public static final int BUTTON_HEIGHT = new JButton().getPreferredSize().height;
 
-  public static final Dimension dialogDimension = new Dimension(450, 140);
-  public static final Dimension comboBoxDimension = new Dimension(250, TEXT_HEIGHT);
-  public static final Dimension textFieldDimension = new Dimension(250, TEXT_HEIGHT);
-  public static final Dimension buttonDimension = new Dimension(75, TEXT_HEIGHT);
-  public static final Dimension buttonPanelDimension = new Dimension(75, TEXT_HEIGHT*7);
+  public static final Dimension dialogDimension = new Dimension(520, 160);
+  public static final Dimension comboBoxDimension = new Dimension(260, TEXT_HEIGHT);
+  public static final Dimension textFieldDimension = new Dimension(260, TEXT_HEIGHT);
+  // Wide enough for "Remove" at the default font: the old 75px clipped it to "Re...".
+  public static final Dimension buttonDimension = new Dimension(96, TEXT_HEIGHT);
+  public static final Dimension buttonPanelDimension = new Dimension(96, TEXT_HEIGHT*7);
   public static final Dimension tableDimension = new Dimension(200, 300);
-  public static final Dimension configurationPaneDimension = new Dimension(470, 200);
+  // The configuration tables need room, otherwise every column header is truncated.
+  public static final Dimension configurationPaneDimension = new Dimension(620, 260);
 
   private IBurpExtenderCallbacks callbacks;
   private IExtensionHelpers helpers;
@@ -65,6 +82,10 @@ public class AutoRepeater implements IMessageEditorController {
   private JSplitPane userInterfaceSplitPane;
 
   private LogTable logTable;
+  private TableRowSorter<LogTableModel> logTableSorter;
+  private JTextField logFilterTextField;
+  private JLabel logCountLabel;
+  private Timer logFilterDebounce;
 
   private DiffViewerPane requestComparer;
   private DiffViewerPane responseComparer;
@@ -89,15 +110,27 @@ public class AutoRepeater implements IMessageEditorController {
   private JLabel originalResponseLabel;
   private JLabel modifiedResponseLabel;
 
-  byte[] originalRequest;
-  byte[] originalResponse;
-  byte[] modifiedRequest;
-  byte[] modifiedResponse;
+  private volatile byte[] originalRequest;
+  private volatile byte[] originalResponse;
+  private volatile byte[] modifiedRequest;
+  private volatile byte[] modifiedResponse;
 
-  String requestDiff;
-  String responseDiff;
-  String requestLineDiff;
-  String responseLineDiff;
+  // Diffs are expensive, so they are computed off the event thread, only for the tab that is
+  // actually visible, and only once per selected log entry. selectionGeneration is bumped on every
+  // selection change so results for a row the user already left are thrown away.
+  private final AtomicLong selectionGeneration = new AtomicLong();
+  private final ExecutorService diffExecutor = Executors.newSingleThreadExecutor(runnable -> {
+    Thread thread = new Thread(runnable, "AutoRepeater-diff");
+    thread.setDaemon(true);
+    return thread;
+  });
+  private long loadedGeneration = -1;
+  private long charDiffGeneration = -1;
+  private long lineDiffGeneration = -1;
+  private StyledDocument requestDiffDocument;
+  private StyledDocument responseDiffDocument;
+  private StyledDocument requestLineDiffDocument;
+  private StyledDocument responseLineDiffDocument;
 
   JScrollPane requestComparerScrollPane;
   JScrollPane responseComparerScollPane;
@@ -147,6 +180,7 @@ public class AutoRepeater implements IMessageEditorController {
     baseReplacementsTableModel = baseReplacements.getReplacementTableModel();
     logManager = new LogManager();
     logTable = new LogTable(logManager.getLogTableModel());
+    logTableSorter = new TableRowSorter<>(logManager.getLogTableModel());
     filters = new Filters(logManager);
     filterTableModel = filters.getFilterTableModel();
     highlighters = new Highlighters(logManager, logTable);
@@ -334,20 +368,25 @@ public class AutoRepeater implements IMessageEditorController {
     modifiedRequestResponseSplitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
     // This tabbedpane includes the configuration panels
     configurationTabbedPane = new JTabbedPane();
-    // Initialize Activated Button
+    // Initialize Activated Button. No fixed size: the label was clipped to "Deactivate AutoRepe..."
+    // whenever the look and feel used a larger font than the hard-coded 200px allowed for.
     activatedButton = new JToggleButton("Activate AutoRepeater");
+    JLabel activatedStatusLabel = new JLabel();
     activatedButton.addChangeListener(e -> {
-      if (activatedButton.isSelected()) {
-        activatedButton.setText("Deactivate AutoRepeater");
-      } else {
-        activatedButton.setText("Activate AutoRepeater");
-      }
+      boolean active = activatedButton.isSelected();
+      activatedButton.setText(active ? "Deactivate AutoRepeater" : "Activate AutoRepeater");
+      activatedStatusLabel.setText(active ? "Active" : "Inactive");
+      activatedStatusLabel.setForeground(active
+          ? Utils.getBurpOrange()
+          : UIManager.getColor("Label.disabledForeground"));
     });
+    activatedButton.setToolTipText(
+        "When active, every message matching the conditions below is replayed with the replacements applied");
+    activatedStatusLabel.setFont(Utils.getHeaderFont(activatedStatusLabel.getFont()));
 
-    Dimension activatedDimension = new Dimension(200, TEXT_HEIGHT);
-    activatedButton.setPreferredSize(activatedDimension);
-    activatedButton.setMaximumSize(activatedDimension);
-    activatedButton.setMinimumSize(activatedDimension);
+    JPanel activatedPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+    activatedPanel.add(activatedButton);
+    activatedPanel.add(activatedStatusLabel);
 
     configurationPane = new JPanel();
     configurationPane.setLayout(new GridBagLayout());
@@ -355,7 +394,8 @@ public class AutoRepeater implements IMessageEditorController {
     configurationPane.setPreferredSize(configurationPaneDimension);
     c = new GridBagConstraints();
     c.anchor = GridBagConstraints.NORTHWEST;
-    configurationPane.add(activatedButton, c);
+    c.insets = new Insets(4, 4, 4, 4);
+    configurationPane.add(activatedPanel, c);
     c.fill = GridBagConstraints.BOTH;
     c.weightx = 1;
     c.weighty = 1;
@@ -376,60 +416,43 @@ public class AutoRepeater implements IMessageEditorController {
     configurationTabbedPane.add("Logs", logsTabbedPane);
 
     // table of log entries
-    logTable.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
-      @Override
-      public Component getTableCellRendererComponent(
-          JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
-        Component c =
-            super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-        c.setBackground(
-            logManager.getLogTableModel().getLogEntry(
-                logTable.convertRowIndexToModel(row)).getBackgroundColor());
-        if(isSelected) {
-          c.setBackground(
-              logManager.getLogTableModel().getLogEntry(
-                  logTable.convertRowIndexToModel(row)).getSelectedBackgroundColor());
-        }
-        return c;
-      }
-    });
+    logTable.setDefaultRenderer(Object.class, new LogCellRenderer(SwingConstants.LEADING));
+    // Counts and lengths read better right aligned.
+    logTable.setDefaultRenderer(Integer.class, new LogCellRenderer(SwingConstants.TRAILING));
+    logTable.setDefaultRenderer(Long.class, new LogCellRenderer(SwingConstants.TRAILING));
 
-    logTable.setAutoCreateRowSorter(true);
+    logTable.setRowSorter(logTableSorter);
+    // Newest request first: this is a live log, so the interesting row is the one that just arrived.
+    logTableSorter.setSortKeys(
+        Collections.singletonList(new RowSorter.SortKey(0, SortOrder.DESCENDING)));
+    logTable.setShowVerticalLines(false);
+    logTable.setIntercellSpacing(new Dimension(0, 1));
+    logTable.setRowHeight(Math.max(logTable.getRowHeight(), TEXT_HEIGHT));
+    logTable.getTableHeader().setReorderingAllowed(false);
+    logTable.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
 
-    logTable.getColumnModel().getColumn(0).setPreferredWidth(5);
-    logTable.getColumnModel().getColumn(1).setPreferredWidth(30);
-    logTable.getColumnModel().getColumn(2).setPreferredWidth(250);
-    logTable.getColumnModel().getColumn(3).setPreferredWidth(20);
-    logTable.getColumnModel().getColumn(4).setPreferredWidth(20);
-    logTable.getColumnModel().getColumn(5).setPreferredWidth(40);
-    logTable.getColumnModel().getColumn(6).setPreferredWidth(40);
-    logTable.getColumnModel().getColumn(7).setPreferredWidth(30);
-
-    // Make every cell left aligned
+    logTable.getColumnModel().getColumn(0).setPreferredWidth(50);
+    logTable.getColumnModel().getColumn(1).setPreferredWidth(70);
+    logTable.getColumnModel().getColumn(2).setPreferredWidth(420);
+    logTable.getColumnModel().getColumn(3).setPreferredWidth(90);
+    logTable.getColumnModel().getColumn(4).setPreferredWidth(70);
+    logTable.getColumnModel().getColumn(5).setPreferredWidth(120);
+    logTable.getColumnModel().getColumn(6).setPreferredWidth(90);
+    logTable.getColumnModel().getColumn(7).setPreferredWidth(110);
 
     JScrollPane logTableScrollPane = new JScrollPane(logTable);
-    logTableScrollPane.setMinimumSize(configurationPaneDimension);
-    logTableScrollPane.setPreferredSize(new Dimension(10000, 10));
+    logTableScrollPane.setBorder(BorderFactory.createEmptyBorder());
+
+    JPanel logPanel = new JPanel(new BorderLayout());
+    logPanel.add(createLogToolbar(), BorderLayout.NORTH);
+    logPanel.add(logTableScrollPane, BorderLayout.CENTER);
+    logPanel.setMinimumSize(new Dimension(360, 120));
+    logPanel.setPreferredSize(new Dimension(10000, 280));
 
     // tabs with request/response viewers
     tabs = new JTabbedPane();
 
-    tabs.addChangeListener(e -> {
-      switch (tabs.getSelectedIndex()) {
-        case 0:
-          updateOriginalRequestResponseViewer();
-          break;
-        case 1:
-          updateModifiedRequestResponseViewer();
-          break;
-        case 2:
-          updateDiffViewer();
-          break;
-        default:
-          updateLineDiffViewer();
-          break;
-      }
-    });
+    tabs.addChangeListener(e -> updateRequestViewers());
 
     // Request / Response Viewers
     originalRequestViewer = callbacks.createMessageEditor(this, false);
@@ -458,14 +481,14 @@ public class AutoRepeater implements IMessageEditorController {
     lineDiffRequestLabel.setForeground(Utils.getBurpOrange());
     lineDiffResponseLabel.setForeground(Utils.getBurpOrange());
 
-    originalRequestLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
-    originalResponseLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
-    modifiedRequestLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
-    modifiedResponseLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
-    diffRequestLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
-    diffResponseLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
-    lineDiffRequestLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
-    lineDiffResponseLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
+    // Derived from the look and feel font so the headers follow Burp's font size setting instead of
+    // being pinned to 14pt SansSerif.
+    for (JLabel label : new JLabel[]{originalRequestLabel, originalResponseLabel,
+        modifiedRequestLabel, modifiedResponseLabel, diffRequestLabel, diffResponseLabel,
+        lineDiffRequestLabel, lineDiffResponseLabel}) {
+      label.setFont(Utils.getHeaderFont(label.getFont()));
+      label.setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
+    }
 
     // Initialize JPanels that hold request/response viewers and labels
     originalRequestPanel = new JPanel();
@@ -499,7 +522,7 @@ public class AutoRepeater implements IMessageEditorController {
 
     c = new GridBagConstraints();
     c.anchor = GridBagConstraints.FIRST_LINE_START;
-    requestDiffPanel.add(diffRequestLabel, c);
+    requestDiffPanel.add(createDiffHeader(diffRequestLabel), c);
     c.gridy = 1;
     c.weightx = 1;
     c.weighty = 1;
@@ -508,7 +531,7 @@ public class AutoRepeater implements IMessageEditorController {
 
     c = new GridBagConstraints();
     c.anchor = GridBagConstraints.FIRST_LINE_START;
-    responseDiffPanel.add(diffResponseLabel, c);
+    responseDiffPanel.add(createDiffHeader(diffResponseLabel), c);
     c.gridy = 1;
     c.weightx = 1;
     c.weighty = 1;
@@ -535,7 +558,7 @@ public class AutoRepeater implements IMessageEditorController {
 
     c = new GridBagConstraints();
     c.anchor = GridBagConstraints.FIRST_LINE_START;
-    requestLineDiffPanel.add(lineDiffRequestLabel, c);
+    requestLineDiffPanel.add(createDiffHeader(lineDiffRequestLabel), c);
     c.gridy = 1;
     c.weightx = 1;
     c.weighty = 1;
@@ -544,7 +567,7 @@ public class AutoRepeater implements IMessageEditorController {
 
     c = new GridBagConstraints();
     c.anchor = GridBagConstraints.FIRST_LINE_START;
-    responseLineDiffPanel.add(lineDiffResponseLabel, c);
+    responseLineDiffPanel.add(createDiffHeader(lineDiffResponseLabel), c);
     c.gridy = 1;
     c.weightx = 1;
     c.weighty = 1;
@@ -593,14 +616,16 @@ public class AutoRepeater implements IMessageEditorController {
     lineDiffSplitPane.setResizeWeight(0.50);
     tabs.addTab("Line Diff", lineDiffSplitPane);
 
-    mainSplitPane.setResizeWeight(.00000000000001);
+    // Both halves grow with the window. The old weight of 1e-14 gave every extra pixel to the
+    // request viewers and left the log table stuck at its initial height.
+    mainSplitPane.setResizeWeight(0.35);
     mainSplitPane.setBottomComponent(tabs);
 
     // Split pane containing user interface components
     userInterfaceSplitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
 
     userInterfaceSplitPane.setRightComponent(configurationPane);
-    userInterfaceSplitPane.setLeftComponent(logTableScrollPane);
+    userInterfaceSplitPane.setLeftComponent(logPanel);
     userInterfaceSplitPane.setResizeWeight(1.0);
     mainSplitPane.setTopComponent(userInterfaceSplitPane);
 
@@ -650,72 +675,79 @@ public class AutoRepeater implements IMessageEditorController {
     callbacks.customizeUiComponent(mainSplitPane);
     callbacks.customizeUiComponent(logTable);
     callbacks.customizeUiComponent(logTableScrollPane);
+    callbacks.customizeUiComponent(logPanel);
     callbacks.customizeUiComponent(tabs);
+  }
+
+  public boolean isActivated() {
+    return activatedButton.isSelected();
   }
 
   public void modifyAndSendRequestAndLog(
       int toolFlag,
       IHttpRequestResponse messageInfo ) {
-    if (activatedButton.isSelected()
-        && toolFlag != BurpExtender.getCallbacks().TOOL_EXTENDER) {
-      boolean meetsConditions = conditionsTableModel.check(toolFlag, messageInfo);
-      if (meetsConditions) {
-        // Create a set to store each new unique request in
-        HashSet<IHttpRequestResponse> requestSet = new HashSet<>();
-        IHttpRequestResponse baseReplacedRequestResponse = Utils
-            .cloneIHttpRequestResponse(messageInfo);
-        // Perform all the base replacements on the captured request
-        for (Replacement globalReplacement : baseReplacementsTableModel.getReplacements()) {
-          baseReplacedRequestResponse.setRequest(
-              globalReplacement.performReplacement(baseReplacedRequestResponse));
-        }
-        //Add the base replaced request to the request set
-        if(replacementsTableModel.getReplacements().size() == 0) {
-          requestSet.add(baseReplacedRequestResponse);
-        }
-        // Perform all the separate replacements on the request+base replacements and add them to the set
-        for (Replacement replacement : replacementsTableModel.getReplacements()) {
-          IHttpRequestResponse newHttpRequest = Utils
-              .cloneIHttpRequestResponse(baseReplacedRequestResponse);
-          newHttpRequest.setRequest(replacement.performReplacement(newHttpRequest));
-          requestSet.add(newHttpRequest);
-        }
-        // Perform every unique request and log
-        for (IHttpRequestResponse request : requestSet) {
-          if (!Arrays.equals(request.getRequest(), messageInfo.getRequest())) {
-            IHttpRequestResponse modifiedRequestResponse =
-                callbacks.makeHttpRequest(messageInfo.getHttpService(), request.getRequest());
-            if(BurpExtender.getAutoRepeaterMenu().sendRequestsToPassiveScanner) {
-              BurpExtender.getCallbacks().doPassiveScan(
-                  modifiedRequestResponse.getHttpService().getHost(),
-                  modifiedRequestResponse.getHttpService().getPort(),
-                  modifiedRequestResponse.getHttpService().getProtocol().equals("https"),
-                  modifiedRequestResponse.getRequest(),
-                  modifiedRequestResponse.getResponse()
-              );
-            }
-            if(BurpExtender.getAutoRepeaterMenu().addRequestsToSiteMap) {
-              BurpExtender.getCallbacks().addToSiteMap(modifiedRequestResponse);
-            }
-
-            if (modifiedRequestResponse.getResponse() == null) {
-              modifiedRequestResponse.setResponse(new byte[0]);
-            }
-
-            int row = logManager.getRowCount();
-            LogEntry newLogEntry = new LogEntry(
-                logManager.getLogTableModel().getLogCount() + 1,
-                toolFlag,
-                callbacks.saveBuffersToTempFiles(messageInfo),
-                callbacks.saveBuffersToTempFiles(modifiedRequestResponse));
-            // Highlight the rows
-            highlighters.highlight(newLogEntry);
-            logManager.addEntry(newLogEntry, filters);
-            logManager.fireTableRowsUpdated(row, row);
-            BurpExtender.getCallbacks().printOutput(Integer.toString(logManager.getRowCount()));
-          }
-        }
+    if (!activatedButton.isSelected() || toolFlag == IBurpExtenderCallbacks.TOOL_EXTENDER) {
+      return;
+    }
+    if (!conditionsTableModel.check(toolFlag, messageInfo)) {
+      return;
+    }
+    final byte[] baseRequest = messageInfo.getRequest();
+    // Keyed by request bytes: the cloned IHttpRequestResponse objects don't implement equals(), so
+    // the HashSet used here previously never actually de-duplicated anything and identical
+    // replacements were sent twice.
+    Map<ByteBuffer, IHttpRequestResponse> requestSet = new LinkedHashMap<>();
+    IHttpRequestResponse baseReplacedRequestResponse = Utils
+        .cloneIHttpRequestResponse(messageInfo);
+    // Perform all the base replacements on the captured request
+    for (Replacement globalReplacement : baseReplacementsTableModel.getReplacements()) {
+      baseReplacedRequestResponse.setRequest(
+          globalReplacement.performReplacement(baseReplacedRequestResponse));
+    }
+    //Add the base replaced request to the request set
+    if (replacementsTableModel.getReplacements().isEmpty()) {
+      requestSet.put(
+          ByteBuffer.wrap(baseReplacedRequestResponse.getRequest()), baseReplacedRequestResponse);
+    }
+    // Perform all the separate replacements on the request+base replacements and add them to the set
+    for (Replacement replacement : replacementsTableModel.getReplacements()) {
+      IHttpRequestResponse newHttpRequest = Utils
+          .cloneIHttpRequestResponse(baseReplacedRequestResponse);
+      newHttpRequest.setRequest(replacement.performReplacement(newHttpRequest));
+      requestSet.putIfAbsent(ByteBuffer.wrap(newHttpRequest.getRequest()), newHttpRequest);
+    }
+    // Perform every unique request and log
+    for (IHttpRequestResponse request : requestSet.values()) {
+      if (Arrays.equals(request.getRequest(), baseRequest)) {
+        continue;
       }
+      IHttpRequestResponse modifiedRequestResponse =
+          callbacks.makeHttpRequest(messageInfo.getHttpService(), request.getRequest());
+      if (AutoRepeaterMenu.sendRequestsToPassiveScanner) {
+        callbacks.doPassiveScan(
+            modifiedRequestResponse.getHttpService().getHost(),
+            modifiedRequestResponse.getHttpService().getPort(),
+            modifiedRequestResponse.getHttpService().getProtocol().equals("https"),
+            modifiedRequestResponse.getRequest(),
+            modifiedRequestResponse.getResponse()
+        );
+      }
+      if (AutoRepeaterMenu.addRequestsToSiteMap) {
+        callbacks.addToSiteMap(modifiedRequestResponse);
+      }
+
+      if (modifiedRequestResponse.getResponse() == null) {
+        modifiedRequestResponse.setResponse(new byte[0]);
+      }
+
+      LogEntry newLogEntry = new LogEntry(
+          logManager.nextLogId(),
+          toolFlag,
+          callbacks.saveBuffersToTempFiles(messageInfo),
+          callbacks.saveBuffersToTempFiles(modifiedRequestResponse));
+      // Highlight the row. The table repaint is left to the batched insert below.
+      highlighters.applyHighlights(newLogEntry);
+      logManager.addEntry(newLogEntry, filters);
     }
   }
 
@@ -731,115 +763,166 @@ public class AutoRepeater implements IMessageEditorController {
     }
   }
 
-  // Implement IMessageEditorController
+  // Implement IMessageEditorController. Burp calls these before anything is selected, hence the
+  // null checks.
   @Override
   public byte[] getRequest() {
-    switch (tabs.getSelectedIndex()) {
-      case 0:
-        return currentOriginalRequestResponse.getRequest();
-      case 1:
-        return currentModifiedRequestResponse.getRequest();
-      default:
-        return new byte[0];
-    }
+    IHttpRequestResponsePersisted requestResponse = getCurrentRequestResponse();
+    return requestResponse == null ? new byte[0] : requestResponse.getRequest();
   }
 
   @Override
   public byte[] getResponse() {
-    switch (tabs.getSelectedIndex()) {
-      case 0:
-        return currentOriginalRequestResponse.getResponse();
-      case 1:
-        return currentModifiedRequestResponse.getResponse();
-      default:
-        return new byte[0];
-    }
+    IHttpRequestResponsePersisted requestResponse = getCurrentRequestResponse();
+    return requestResponse == null ? new byte[0] : requestResponse.getResponse();
   }
 
   @Override
   public IHttpService getHttpService() {
+    IHttpRequestResponsePersisted requestResponse = getCurrentRequestResponse();
+    return requestResponse == null ? null : requestResponse.getHttpService();
+  }
+
+  private IHttpRequestResponsePersisted getCurrentRequestResponse() {
     switch (tabs.getSelectedIndex()) {
       case 0:
-        return currentOriginalRequestResponse.getHttpService();
+        return currentOriginalRequestResponse;
       case 1:
-        return currentModifiedRequestResponse.getHttpService();
+        return currentModifiedRequestResponse;
       default:
         return null;
     }
   }
 
-  private void updateOriginalRequestResponseViewer() {
-    SwingUtilities.invokeLater(() -> {
-      // Set Original Request Viewer
-      if (originalRequest != null) {
-        originalRequestViewer.setMessage(originalRequest, true);
-      } else {
-        originalRequestViewer.setMessage(new byte[0], true);
-      }
-
-      // Set Original Response Viewer
-      if (originalResponse != null) {
-        originalResponseViewer.setMessage(originalResponse, false);
-      } else {
-        originalResponseViewer.setMessage(new byte[0], false);
-      }
+  /**
+   * Reads the request/response bodies of the selected entry off the event thread (they live in
+   * Burp's temp files) and then refreshes whichever tab is visible.
+   */
+  private void selectLogEntry(LogEntry logEntry) {
+    final long generation = selectionGeneration.incrementAndGet();
+    diffExecutor.submit(() -> {
+      byte[] newOriginalRequest = logEntry.getOriginalRequestResponse().getRequest();
+      byte[] newOriginalResponse = logEntry.getOriginalRequestResponse().getResponse();
+      byte[] newModifiedRequest = logEntry.getModifiedRequestResponse().getRequest();
+      byte[] newModifiedResponse = logEntry.getModifiedRequestResponse().getResponse();
+      SwingUtilities.invokeLater(() -> {
+        if (generation != selectionGeneration.get()) {
+          return;
+        }
+        originalRequest = newOriginalRequest;
+        originalResponse = newOriginalResponse;
+        modifiedRequest = newModifiedRequest;
+        modifiedResponse = newModifiedResponse;
+        currentOriginalRequestResponse = logEntry.getOriginalRequestResponse();
+        currentModifiedRequestResponse = logEntry.getModifiedRequestResponse();
+        loadedGeneration = generation;
+        // Invalidate cached diffs; they are recomputed lazily if a diff tab is open.
+        requestDiffDocument = null;
+        responseDiffDocument = null;
+        requestLineDiffDocument = null;
+        responseLineDiffDocument = null;
+        updateRequestViewers();
+      });
     });
+  }
+
+  private void updateOriginalRequestResponseViewer() {
+    originalRequestViewer.setMessage(originalRequest == null ? new byte[0] : originalRequest, true);
+    originalResponseViewer
+        .setMessage(originalResponse == null ? new byte[0] : originalResponse, false);
   }
 
   private void updateModifiedRequestResponseViewer() {
-    SwingUtilities.invokeLater(() -> {
-      // Set Modified Request Viewer
-      if (modifiedRequest != null) {
-        modifiedRequestViewer.setMessage(modifiedRequest, true);
-      } else {
-        modifiedRequestViewer.setMessage(new byte[0], true);
-      }
-
-      // Set Modified Response Viewer
-      if (modifiedResponse != null) {
-        modifiedResponseViewer.setMessage(modifiedResponse, false);
-      } else {
-        modifiedResponseViewer.setMessage(new byte[0], false);
-      }
-    });
+    modifiedRequestViewer.setMessage(modifiedRequest == null ? new byte[0] : modifiedRequest, true);
+    modifiedResponseViewer
+        .setMessage(modifiedResponse == null ? new byte[0] : modifiedResponse, false);
   }
 
   private void updateDiffViewer() {
-    SwingUtilities.invokeLater(() -> {
-      if (originalRequest != null && modifiedRequest != null) {
-        requestComparer.setText(requestDiff);
-        requestComparer.setCaretPosition(0);
-      } else {
-        requestComparer.setText("");
-      }
-
-      // Set Response Diff Viewer
-      if (originalResponse != null && modifiedResponse != null) {
-        responseComparer.setText(responseDiff);
-        responseComparer.setCaretPosition(0);
-      } else {
-        responseComparer.setText("");
-      }
+    if (requestDiffDocument != null && responseDiffDocument != null) {
+      requestComparer.setDiffDocument(requestDiffDocument);
+      responseComparer.setDiffDocument(responseDiffDocument);
+      return;
+    }
+    if (originalRequest == null || modifiedRequest == null) {
+      requestComparer.clearDiff();
+      responseComparer.clearDiff();
+      return;
+    }
+    final long generation = loadedGeneration;
+    if (charDiffGeneration == generation) {
+      // A diff for this row is already being computed.
+      return;
+    }
+    charDiffGeneration = generation;
+    requestComparer.setDiffDocument(StyledDiffDocument.ofText("Computing diff..."));
+    responseComparer.setDiffDocument(StyledDiffDocument.ofText("Computing diff..."));
+    final byte[] oRequest = originalRequest;
+    final byte[] mRequest = modifiedRequest;
+    final byte[] oResponse = originalResponse;
+    final byte[] mResponse = modifiedResponse;
+    diffExecutor.submit(() -> {
+      StyledDocument request = HttpComparer
+          .diffTextDocument(asString(oRequest), asString(mRequest));
+      StyledDocument response = HttpComparer
+          .diffTextDocument(asString(oResponse), asString(mResponse));
+      SwingUtilities.invokeLater(() -> {
+        if (generation != selectionGeneration.get()) {
+          return;
+        }
+        requestDiffDocument = request;
+        responseDiffDocument = response;
+        if (tabs.getSelectedIndex() == 2) {
+          requestComparer.setDiffDocument(request);
+          responseComparer.setDiffDocument(response);
+        }
+      });
     });
   }
 
   private void updateLineDiffViewer() {
-    SwingUtilities.invokeLater(() -> {
-      if (originalRequest != null && modifiedRequest != null) {
-        requestLineComparer.setText(requestLineDiff);
-        requestLineComparer.setCaretPosition(0);
-      } else {
-        requestLineComparer.setText("");
-      }
-
-      // Set Response Diff Viewer
-      if (originalResponse != null && modifiedResponse != null) {
-        responseLineComparer.setText(responseLineDiff);
-        responseLineComparer.setCaretPosition(0);
-      } else {
-        responseLineComparer.setText("");
-      }
+    if (requestLineDiffDocument != null && responseLineDiffDocument != null) {
+      requestLineComparer.setDiffDocument(requestLineDiffDocument);
+      responseLineComparer.setDiffDocument(responseLineDiffDocument);
+      return;
+    }
+    if (originalRequest == null || modifiedRequest == null) {
+      requestLineComparer.clearDiff();
+      responseLineComparer.clearDiff();
+      return;
+    }
+    final long generation = loadedGeneration;
+    if (lineDiffGeneration == generation) {
+      return;
+    }
+    lineDiffGeneration = generation;
+    requestLineComparer.setDiffDocument(StyledDiffDocument.ofText("Computing diff..."));
+    responseLineComparer.setDiffDocument(StyledDiffDocument.ofText("Computing diff..."));
+    final byte[] oRequest = originalRequest;
+    final byte[] mRequest = modifiedRequest;
+    final byte[] oResponse = originalResponse;
+    final byte[] mResponse = modifiedResponse;
+    diffExecutor.submit(() -> {
+      StyledDocument request = HttpComparer
+          .diffLinesDocument(asString(oRequest), asString(mRequest));
+      StyledDocument response = HttpComparer
+          .diffLinesDocument(asString(oResponse), asString(mResponse));
+      SwingUtilities.invokeLater(() -> {
+        if (generation != selectionGeneration.get()) {
+          return;
+        }
+        requestLineDiffDocument = request;
+        responseLineDiffDocument = response;
+        if (tabs.getSelectedIndex() == 3) {
+          requestLineComparer.setDiffDocument(request);
+          responseLineComparer.setDiffDocument(response);
+        }
+      });
     });
+  }
+
+  private static String asString(byte[] bytes) {
+    return bytes == null ? "" : new String(bytes, StandardCharsets.ISO_8859_1);
   }
 
   private void updateRequestViewers() {
@@ -859,26 +942,175 @@ public class AutoRepeater implements IMessageEditorController {
     }
   }
 
+  /** Diff pane header: the title plus a legend for the two highlight colours. */
+  private static JComponent createDiffHeader(JLabel titleLabel) {
+    JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
+    header.add(titleLabel);
+    header.add(createLegendSwatch("added", DiffViewerPane.insertBackground()));
+    header.add(createLegendSwatch("removed", DiffViewerPane.deleteBackground()));
+    return header;
+  }
+
+  private static JLabel createLegendSwatch(String text, Color background) {
+    JLabel swatch = new JLabel(text);
+    swatch.setOpaque(true);
+    swatch.setBackground(background);
+    swatch.setForeground(Utils.getContrastingForeground(background));
+    swatch.setBorder(BorderFactory.createCompoundBorder(
+        BorderFactory.createLineBorder(background.darker()),
+        BorderFactory.createEmptyBorder(1, 5, 1, 5)));
+    return swatch;
+  }
+
+  /**
+   * Search field, row count and a clear button above the log table. Clearing the log used to be
+   * reachable only from the right click menu and there was no way to search the log at all.
+   */
+  private JComponent createLogToolbar() {
+    JPanel toolbar = new JPanel(new GridBagLayout());
+    toolbar.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
+
+    logFilterTextField = new JTextField();
+    logFilterTextField.setToolTipText(
+        "Show only rows containing this text. Prefix with \"re:\" for a regular expression.");
+    logFilterTextField.putClientProperty("JTextField.placeholderText", "Search logs");
+    // Debounced: re-filtering walks every row, so it should not run on every keystroke.
+    logFilterDebounce = new Timer(200, e -> applyQuickFilter());
+    logFilterDebounce.setRepeats(false);
+    logFilterTextField.getDocument().addDocumentListener(new DocumentListener() {
+      @Override
+      public void insertUpdate(DocumentEvent e) {
+        logFilterDebounce.restart();
+      }
+
+      @Override
+      public void removeUpdate(DocumentEvent e) {
+        logFilterDebounce.restart();
+      }
+
+      @Override
+      public void changedUpdate(DocumentEvent e) {
+        logFilterDebounce.restart();
+      }
+    });
+
+    logCountLabel = new JLabel();
+    logCountLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+
+    JButton clearLogButton = new JButton("Clear");
+    clearLogButton.setToolTipText("Remove every logged request from this tab");
+    clearLogButton.addActionListener(e -> {
+      logManager.getLogTableModel().clearLogs();
+      updateLogCountLabel();
+    });
+
+    GridBagConstraints c = new GridBagConstraints();
+    c.gridy = 0;
+    c.insets = new Insets(0, 0, 0, 6);
+    c.anchor = GridBagConstraints.LINE_START;
+    toolbar.add(new JLabel("Search:"), c);
+    c.fill = GridBagConstraints.HORIZONTAL;
+    c.weightx = 1;
+    toolbar.add(logFilterTextField, c);
+    c.fill = GridBagConstraints.NONE;
+    c.weightx = 0;
+    toolbar.add(logCountLabel, c);
+    c.insets = new Insets(0, 0, 0, 0);
+    toolbar.add(clearLogButton, c);
+
+    logManager.getLogTableModel().addTableModelListener(e -> updateLogCountLabel());
+    updateLogCountLabel();
+    return toolbar;
+  }
+
+  private void applyQuickFilter() {
+    String text = logFilterTextField.getText().trim();
+    if (text.isEmpty()) {
+      logTableSorter.setRowFilter(null);
+    } else if (text.startsWith("re:")) {
+      try {
+        logTableSorter.setRowFilter(RowFilter.regexFilter(text.substring(3)));
+      } catch (PatternSyntaxException e) {
+        // Incomplete expression while typing: keep the previous filter.
+        return;
+      }
+    } else {
+      final String needle = text.toLowerCase(Locale.ROOT);
+      logTableSorter.setRowFilter(new RowFilter<LogTableModel, Integer>() {
+        @Override
+        public boolean include(Entry<? extends LogTableModel, ? extends Integer> entry) {
+          for (int i = 0; i < entry.getValueCount(); i++) {
+            Object value = entry.getValue(i);
+            if (value != null && value.toString().toLowerCase(Locale.ROOT).contains(needle)) {
+              return true;
+            }
+          }
+          return false;
+        }
+      });
+    }
+    updateLogCountLabel();
+  }
+
+  private void updateLogCountLabel() {
+    if (logCountLabel == null) {
+      return;
+    }
+    int shown = logTable.getRowCount();
+    int total = logManager.getLogTableModel().getLogCount();
+    logCountLabel.setText(shown == total
+        ? shown + (shown == 1 ? " request" : " requests")
+        : shown + " of " + total + " requests");
+  }
+
+  /**
+   * Paints highlighter colours with a readable foreground, and falls back to the look and feel's own
+   * colours for unhighlighted rows. Previously every row was painted with a hard-coded white
+   * background, which is unreadable under Burp's dark themes.
+   */
+  private class LogCellRenderer extends DefaultTableCellRenderer {
+
+    LogCellRenderer(int alignment) {
+      setHorizontalAlignment(alignment);
+    }
+
+    @Override
+    public Component getTableCellRendererComponent(
+        JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
+      Component component =
+          super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+      LogEntry logEntry = null;
+      int modelRow = table.convertRowIndexToModel(row);
+      if (modelRow >= 0 && modelRow < logManager.getRowCount()) {
+        logEntry = logManager.getLogEntry(modelRow);
+      }
+      Color highlight = logEntry == null ? null : logEntry.getBackgroundColor();
+      boolean isHighlighted = highlight != null && !highlight.equals(Highlighter.COLORS[0]);
+      if (isSelected) {
+        Color background =
+            isHighlighted ? logEntry.getSelectedBackgroundColor() : table.getSelectionBackground();
+        component.setBackground(background);
+        component.setForeground(isHighlighted
+            ? Utils.getContrastingForeground(background) : table.getSelectionForeground());
+      } else {
+        Color background = isHighlighted ? highlight : table.getBackground();
+        component.setBackground(background);
+        component.setForeground(isHighlighted
+            ? Utils.getContrastingForeground(background) : table.getForeground());
+      }
+      return component;
+    }
+  }
+
   // JTable for Viewing Logs
   public class LogTable extends JTable {
 
     public LogTable(TableModel tableModel) {
       super(tableModel);
-    }
-
-    @Override
-    public void changeSelection(int row, int col, boolean toggle, boolean extend) {
-      super.changeSelection(row, col, toggle, extend);
-      // show the log entry for the selected row
-      LogEntry logEntry = logManager.getLogEntry(convertRowIndexToModel(row));
-
-      //final LogTable _this = this;
-      this.addMouseListener(new MouseAdapter() {
-        @Override
-        public void mouseClicked(MouseEvent e) {
-          onMouseEvent(e);
-        }
-
+      // Registered once. The original code added a new listener on every selection change, so the
+      // popup menu was rebuilt and shown once per past selection and the table got slower with
+      // every click.
+      addMouseListener(new MouseAdapter() {
         @Override
         public void mouseReleased(MouseEvent e) {
           onMouseEvent(e);
@@ -889,53 +1121,48 @@ public class AutoRepeater implements IMessageEditorController {
           onMouseEvent(e);
         }
 
-        // Event for clearing the logs
         private void onMouseEvent(MouseEvent e) {
-          if (SwingUtilities.isRightMouseButton(e)) {
-            Point p = e.getPoint();
-            final int row = convertRowIndexToModel(rowAtPoint(p));
-            final int col = convertColumnIndexToModel(columnAtPoint(p));
-            if (e.isPopupTrigger() && e.getComponent() instanceof JTable) {
-              getSelectionModel().setSelectionInterval(row, row);
-              new LogEntryMenu(logManager, logTable, row, col)
-                  .show(e.getComponent(), e.getX(), e.getY());
-            }
+          if (!e.isPopupTrigger()) {
+            return;
           }
+          Point p = e.getPoint();
+          int viewRow = rowAtPoint(p);
+          int viewColumn = columnAtPoint(p);
+          if (viewRow < 0 || viewColumn < 0) {
+            return;
+          }
+          final int row = convertRowIndexToModel(viewRow);
+          final int col = convertColumnIndexToModel(viewColumn);
+          getSelectionModel().setSelectionInterval(viewRow, viewRow);
+          new LogEntryMenu(logManager, LogTable.this, row, col)
+              .show(e.getComponent(), e.getX(), e.getY());
         }
       });
+    }
 
-      // There's a delay while changing selections because setting the diff viewer is slow.
-      new Thread(() -> {
-        originalRequest = logEntry.getOriginalRequestResponse().getRequest();
-        originalResponse = logEntry.getOriginalRequestResponse().getResponse();
-        modifiedRequest = logEntry.getModifiedRequestResponse().getRequest();
-        modifiedResponse = logEntry.getModifiedRequestResponse().getResponse();
-        currentOriginalRequestResponse = logEntry.getOriginalRequestResponse();
-        currentModifiedRequestResponse = logEntry.getModifiedRequestResponse();
+    /** URLs are wider than the column, so the full value is shown on hover. */
+    @Override
+    public String getToolTipText(MouseEvent event) {
+      int viewRow = rowAtPoint(event.getPoint());
+      int viewColumn = columnAtPoint(event.getPoint());
+      if (viewRow < 0 || viewColumn < 0) {
+        return null;
+      }
+      Object value = getValueAt(viewRow, viewColumn);
+      return value == null ? null : value.toString();
+    }
 
-        new Thread(() -> {
-          requestDiff = HttpComparer
-              .diffText(new String(originalRequest), new String(modifiedRequest));
-          updateRequestViewers();
-        }).start();
-        new Thread(() -> {
-          responseDiff = HttpComparer
-              .diffText(new String(originalResponse), new String(modifiedResponse));
-          updateRequestViewers();
-        }).start();
-        new Thread(() -> {
-          requestLineDiff = HttpComparer
-              .diffLines(new String(originalRequest), new String(modifiedRequest));
-          updateRequestViewers();
-        }).start();
-        new Thread(() -> {
-          responseLineDiff = HttpComparer
-              .diffLines(new String(originalResponse), new String(modifiedResponse));
-          updateRequestViewers();
-        }).start();
-        updateRequestViewers();
-        // Hack to speed up the ui
-      }).start();
+    @Override
+    public void changeSelection(int row, int col, boolean toggle, boolean extend) {
+      super.changeSelection(row, col, toggle, extend);
+      if (row < 0 || row >= getRowCount()) {
+        return;
+      }
+      int modelRow = convertRowIndexToModel(row);
+      if (modelRow < 0 || modelRow >= logManager.getRowCount()) {
+        return;
+      }
+      selectLogEntry(logManager.getLogEntry(modelRow));
     }
   }
 }

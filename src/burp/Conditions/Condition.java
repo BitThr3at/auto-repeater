@@ -20,6 +20,52 @@ public class Condition {
   private String matchCondition;
   private boolean isEnabled;
 
+  /**
+   * Conditions are evaluated for every message Burp sees, and String.matches()/Pattern.compile()
+   * re-parse the pattern on every call. The compiled pattern is cached instead. transient keeps it
+   * out of the Gson serialisation of saved configurations.
+   */
+  private transient volatile CompiledPattern patternCache;
+
+  private static final class CompiledPattern {
+    final String source;
+    final Pattern pattern;
+
+    CompiledPattern(String source, Pattern pattern) {
+      this.source = source;
+      this.pattern = pattern;
+    }
+  }
+
+  private Pattern matchPattern() {
+    String source = this.matchCondition;
+    CompiledPattern cached = patternCache;
+    if (cached != null && cached.source.equals(source)) {
+      return cached.pattern;
+    }
+    Pattern pattern;
+    try {
+      pattern = Pattern.compile(source);
+    } catch (RuntimeException e) {
+      // Invalid regex: treat it as matching nothing rather than throwing on every message.
+      pattern = null;
+    }
+    patternCache = new CompiledPattern(source, pattern);
+    return pattern;
+  }
+
+  /** Equivalent of String.matches(matchCondition), with the pattern cached. */
+  private boolean matchesFully(String input) {
+    Pattern pattern = matchPattern();
+    return pattern != null && pattern.matcher(input).matches();
+  }
+
+  /** Equivalent of Pattern.compile(matchCondition).matcher(input).find(), with the pattern cached. */
+  private boolean matchesAnywhere(String input) {
+    Pattern pattern = matchPattern();
+    return pattern != null && pattern.matcher(input).find();
+  }
+
   public Condition(
       String booleanOperator,
       String matchType,
@@ -239,9 +285,9 @@ public class Condition {
       case "Does Not Match":
         return !(new String(messageInfo.getRequest()).contains(this.matchCondition));
       case "Matches Regex":
-        return Pattern.compile(this.matchCondition).matcher(new String(messageInfo.getRequest())).find();
+        return matchesAnywhere(new String(messageInfo.getRequest()));
       default:
-        return !(Pattern.compile(this.matchCondition).matcher(new String(messageInfo.getRequest())).find());
+        return !matchesAnywhere(new String(messageInfo.getRequest()));
     }
   }
 
@@ -252,9 +298,9 @@ public class Condition {
       case "Does Not Match":
         return !(new String(messageInfo.getResponse()).contains(this.matchCondition));
       case "Matches Regex":
-        return Pattern.compile(this.matchCondition).matcher(new String(messageInfo.getResponse())).find();
+        return matchesAnywhere(new String(messageInfo.getResponse()));
       default:
-        return !(Pattern.compile(this.matchCondition).matcher(new String(messageInfo.getResponse())).find());
+        return !matchesAnywhere(new String(messageInfo.getResponse()));
     }
   }
 
@@ -300,9 +346,9 @@ public class Condition {
     IRequestInfo analyzedRequest = BurpExtender.getHelpers().analyzeRequest(messageInfo);
     switch (this.matchRelationship) {
       case "Matches":
-        return analyzedRequest.getMethod().matches(this.matchCondition);
+        return matchesFully(analyzedRequest.getMethod());
       default:
-        return !analyzedRequest.getMethod().matches(this.matchCondition);
+        return !matchesFully(analyzedRequest.getMethod());
     }
   }
 
@@ -312,9 +358,9 @@ public class Condition {
       case "Is In Scope":
         return BurpExtender.getCallbacks().isInScope(analyzedRequest.getUrl());
       case "Matches":
-        return analyzedRequest.getUrl().toString().matches(this.matchCondition);
+        return matchesFully(analyzedRequest.getUrl().toString());
       default:
-        return !analyzedRequest.getUrl().toString().matches(this.matchCondition);
+        return !matchesFully(analyzedRequest.getUrl().toString());
     }
   }
 
@@ -323,9 +369,9 @@ public class Condition {
     String fileExtension = Files.getFileExtension(analyzedRequest.getUrl().toString());
     switch (this.matchRelationship) {
       case "Matches":
-        return fileExtension.matches(this.matchCondition);
+        return matchesFully(fileExtension);
       default:
-        return !fileExtension.matches(this.matchCondition);
+        return !matchesFully(fileExtension);
     }
   }
 
@@ -346,46 +392,28 @@ public class Condition {
 
   private boolean checkCookieName(IHttpRequestResponse messageInfo) {
     IRequestInfo analyzedRequest = BurpExtender.getHelpers().analyzeRequest(messageInfo);
-    List<IParameter> cookiesByName = analyzedRequest.getParameters()
+    boolean hasMatch = analyzedRequest.getParameters()
         .stream()
         .filter(p -> p.getType() == IParameter.PARAM_COOKIE)
-        .filter(p -> p.getName().matches(this.matchCondition))
-        .collect(Collectors.toList());
-    switch (this.matchRelationship) {
-      case "Matches":
-        return cookiesByName.size() > 0;
-      default:
-        return !(cookiesByName.size() > 0);
-    }
+        .anyMatch(p -> matchesFully(p.getName()));
+    return "Matches".equals(this.matchRelationship) == hasMatch;
   }
 
   private boolean checkCookieValue(IHttpRequestResponse messageInfo) {
     IRequestInfo analyzedRequest = BurpExtender.getHelpers().analyzeRequest(messageInfo);
-    List<IParameter> cookiesByName = analyzedRequest.getParameters()
+    boolean hasMatch = analyzedRequest.getParameters()
         .stream()
         .filter(p -> p.getType() == IParameter.PARAM_COOKIE)
-        .filter(p -> p.getName().matches(this.matchCondition))
-        .collect(Collectors.toList());
-    switch (this.matchRelationship) {
-      case "Matches":
-        return cookiesByName.size() > 0;
-      default:
-        return !(cookiesByName.size() > 0);
-    }
+        .anyMatch(p -> matchesFully(p.getValue()));
+    return "Matches".equals(this.matchRelationship) == hasMatch;
   }
 
   private boolean checkAnyHeader(IHttpRequestResponse messageInfo) {
     IRequestInfo analyzedRequest = BurpExtender.getHelpers().analyzeRequest(messageInfo);
-    List<String> matchingHeaders = analyzedRequest.getHeaders()
+    boolean hasMatch = analyzedRequest.getHeaders()
         .stream()
-        .filter(h -> h.matches(this.matchCondition))
-        .collect(Collectors.toList());
-    switch (this.matchRelationship) {
-      case "Matches":
-        return matchingHeaders.size() > 0;
-      default:
-        return !(matchingHeaders.size() > 0);
-    }
+        .anyMatch(this::matchesFully);
+    return "Matches".equals(this.matchRelationship) == hasMatch;
   }
 
   private boolean checkRequestBody(IHttpRequestResponse messageInfo) {
@@ -393,40 +421,23 @@ public class Condition {
     byte[] request = messageInfo.getRequest();
     String bodyString = new String(
         Arrays.copyOfRange(request, analyzedRequest.getBodyOffset(), request.length));
-    switch (this.matchRelationship) {
-      case ("Matches"):
-        return bodyString.matches(this.matchCondition);
-      default:
-        return !bodyString.matches(this.matchCondition);
-    }
+    return "Matches".equals(this.matchRelationship) == matchesFully(bodyString);
   }
 
   private boolean checkParamName(IHttpRequestResponse messageInfo) {
     IRequestInfo analyzedRequest = BurpExtender.getHelpers().analyzeRequest(messageInfo);
-    List<IParameter> parametersByName = analyzedRequest.getParameters()
+    boolean hasMatch = analyzedRequest.getParameters()
         .stream()
-        .filter(p -> p.getName().matches(this.matchCondition))
-        .collect(Collectors.toList());
-    switch (this.matchRelationship) {
-      case "Matches":
-        return parametersByName.size() > 0;
-      default:
-        return !(parametersByName.size() > 0);
-    }
+        .anyMatch(p -> matchesFully(p.getName()));
+    return "Matches".equals(this.matchRelationship) == hasMatch;
   }
 
   private boolean checkParamValue(IHttpRequestResponse messageInfo) {
     IRequestInfo analyzedRequest = BurpExtender.getHelpers().analyzeRequest(messageInfo);
-    List<IParameter> parametersByValue = analyzedRequest.getParameters()
+    boolean hasMatch = analyzedRequest.getParameters()
         .stream()
-        .filter(p -> p.getValue().matches(this.matchCondition))
-        .collect(Collectors.toList());
-    switch (this.matchRelationship) {
-      case "Matches":
-        return parametersByValue.size() > 0;
-      default:
-        return !(parametersByValue.size() > 0);
-    }
+        .anyMatch(p -> matchesFully(p.getValue()));
+    return "Matches".equals(this.matchRelationship) == hasMatch;
   }
 
   private boolean checkSentFromTool(int toolFlag) {

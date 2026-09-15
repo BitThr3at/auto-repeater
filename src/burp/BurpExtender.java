@@ -12,8 +12,11 @@ import java.awt.*;
 import java.awt.event.*;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import javax.swing.*;
 import javax.swing.Timer;
 import javax.swing.event.DocumentEvent;
@@ -36,7 +39,8 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
   // Global state variables
   private static int tabCounter = 0;
   private static boolean tabChangeListenerLock = false;
-  private static ArrayList<AutoRepeater> autoRepeaters;
+  // Iterated on Burp's HTTP threads while tabs are added/removed on the event thread.
+  private static CopyOnWriteArrayList<AutoRepeater> autoRepeaters;
 
   @Override
   public void registerExtenderCallbacks(final IBurpExtenderCallbacks callbacks) {
@@ -47,8 +51,19 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
     // Gson for serialization
     BurpExtender.gson = new Gson();
     //BurpExtender.gson = new GsonBuilder().setPrettyPrinting().create();
-    autoRepeaters = new ArrayList<>();
-    executor = Executors.newFixedThreadPool(25);
+    autoRepeaters = new CopyOnWriteArrayList<>();
+    // Bounded queue with CallerRuns: under heavy proxy traffic an unbounded queue just grows until
+    // the extension runs out of memory. Blocking the submitting thread throttles instead.
+    ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(
+        4, 25, 60L, TimeUnit.SECONDS, new ArrayBlockingQueue<>(500),
+        runnable -> {
+          Thread thread = new Thread(runnable, "AutoRepeater-worker");
+          thread.setDaemon(true);
+          return thread;
+        },
+        new ThreadPoolExecutor.CallerRunsPolicy());
+    threadPoolExecutor.allowCoreThreadTimeOut(true);
+    executor = threadPoolExecutor;
     // create our UI
     SwingUtilities.invokeLater(() -> {
       mainTabbedPane = new JTabbedPane();
@@ -87,7 +102,10 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
       // Add response store
       //Save State
       callbacks.registerExtensionStateListener(
-          () -> callbacks.saveExtensionSetting(getTabCaption(), exportSave())
+          () -> {
+            callbacks.saveExtensionSetting(getTabCaption(), exportSave());
+            executor.shutdownNow();
+          }
       );
       // Add A Custom Tab To Burp
       callbacks.addSuiteTab(BurpExtender.this);
@@ -245,14 +263,19 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
   @Override
   public void processHttpMessage(
       int toolFlag, boolean messageIsRequest, IHttpRequestResponse messageInfo) {
-    if (!messageIsRequest) {
-      for (AutoRepeater autoRepeater : autoRepeaters) {
-        executor.submit(
-            () -> autoRepeater.modifyAndSendRequestAndLog(
-                toolFlag,
-                messageInfo)
-        );
+    if (messageIsRequest || toolFlag == IBurpExtenderCallbacks.TOOL_EXTENDER) {
+      return;
+    }
+    for (AutoRepeater autoRepeater : autoRepeaters) {
+      // Checked here as well so a deactivated tab costs nothing on Burp's HTTP threads.
+      if (!autoRepeater.isActivated()) {
+        continue;
       }
+      executor.submit(
+          () -> autoRepeater.modifyAndSendRequestAndLog(
+              toolFlag,
+              messageInfo)
+      );
     }
   }
 
@@ -280,22 +303,24 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
 
     public AutoRepeaterTabHandle(String title, AutoRepeater autoRepeater) {
       this.autoRepeater = autoRepeater;
-      this.setLayout(new FlowLayout(FlowLayout.LEFT, 0, 0));
+      this.setLayout(new FlowLayout(FlowLayout.LEFT, 2, 0));
       this.setOpaque(false);
-      JLabel label = new JLabel(title);
-      label.setBorder(BorderFactory.createEmptyBorder(1, 2, 1, 2));
       tabName = new JTextField(title);
       tabName.setOpaque(false);
       tabName.setBorder(null);
       tabName.setBackground(new Color(0, 0, 0, 0));
       tabName.setEditable(false);
-      tabName.setCaretColor(Color.BLACK);
+      // Follows the theme: a black caret is invisible on Burp's dark themes.
+      tabName.setCaretColor(UIManager.getColor("TabbedPane.foreground"));
+      tabName.setToolTipText("Click the selected tab's name to rename it");
+      tabName.setColumns(Math.max(4, title.length()));
 
       this.add(tabName);
       JButton closeButton = new JButton("✕");
-      closeButton.setFont(new Font("monospaced", Font.PLAIN, 10));
+      closeButton.setFont(closeButton.getFont().deriveFont(Font.PLAIN, 10f));
       closeButton.setBorder(BorderFactory.createEmptyBorder(1, 2, 1, 2));
-      closeButton.setForeground(Color.GRAY);
+      closeButton.setForeground(UIManager.getColor("Label.disabledForeground"));
+      closeButton.setToolTipText("Close this AutoRepeater tab");
 
       closeButton.setBorderPainted(false);
       closeButton.setContentAreaFilled(false);
@@ -397,7 +422,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
     return helpers;
   }
 
-  public static ArrayList<AutoRepeater> getAutoRepeaters() {
+  public static List<AutoRepeater> getAutoRepeaters() {
     return autoRepeaters;
   }
 

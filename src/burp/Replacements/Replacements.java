@@ -2,6 +2,7 @@ package burp.Replacements;
 
 import burp.AutoRepeater;
 import burp.BurpExtender;
+import burp.Utils.Utils;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import javax.swing.JButton;
@@ -208,8 +209,9 @@ public class Replacements {
 
     replacementTableModel = new ReplacementTableModel();
     replacementTable = new JTable(replacementTableModel);
-    replacementTable.getColumnModel().getColumn(0).setMaxWidth(55);
-    replacementTable.getColumnModel().getColumn(0).setMinWidth(55);
+    replacementTable.getColumnModel().getColumn(0).setMaxWidth(60);
+    replacementTable.getColumnModel().getColumn(0).setMinWidth(60);
+    Utils.configureConfigurationTable(replacementTable, 60, 150, 150, 150, 90, 150, 90);
     replacementScrollPane = new JScrollPane(replacementTable);
     replacementScrollPane.setMinimumSize(AutoRepeater.tableDimension);
 

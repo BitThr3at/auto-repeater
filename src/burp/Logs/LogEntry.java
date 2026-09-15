@@ -4,7 +4,6 @@ import burp.BurpExtender;
 import burp.Highlighter.Highlighter;
 import burp.IHttpRequestResponsePersisted;
 import burp.IRequestInfo;
-import burp.IResponseInfo;
 import java.awt.Color;
 import java.net.URL;
 import java.util.Arrays;
@@ -17,6 +16,8 @@ public class LogEntry {
 
   private URL originalURL;
   private URL modifiedURL;
+  // Rendered for every repaint of the URL column, so it is built once.
+  private transient String modifiedUrlString;
 
   private String originalMethod;
   private String modifiedMethod;
@@ -86,6 +87,13 @@ public class LogEntry {
 
   public URL getModifiedURL() {
     return modifiedURL;
+  }
+
+  public String getModifiedUrlString() {
+    if (modifiedUrlString == null) {
+      modifiedUrlString = modifiedURL == null ? "" : modifiedURL.toString();
+    }
+    return modifiedUrlString;
   }
 
   public void setModifiedURL(URL modifiedURL) {
@@ -203,13 +211,14 @@ public class LogEntry {
     IRequestInfo modifiedAnalyzedRequest = BurpExtender.getHelpers()
         .analyzeRequest(modifiedRequestResponse);
 
-    IResponseInfo originalAnalyzedResponse = BurpExtender.getHelpers()
-        .analyzeResponse(originalRequestResponse.getResponse());
-    this.originalResponseStatus = originalAnalyzedResponse.getStatusCode();
+    // Each getResponse()/getRequest() call reads back from Burp's temp file, so read once.
+    byte[] originalResponseBytes = originalRequestResponse.getResponse();
+    byte[] modifiedResponseBytes = modifiedRequestResponse.getResponse();
 
-    IResponseInfo modifiedAnalyzedResponse = BurpExtender.getHelpers()
-            .analyzeResponse(modifiedRequestResponse.getResponse());
-    this.modifiedResponseStatus = modifiedAnalyzedResponse.getStatusCode();
+    this.originalResponseStatus = BurpExtender.getHelpers()
+        .analyzeResponse(originalResponseBytes).getStatusCode();
+    this.modifiedResponseStatus = BurpExtender.getHelpers()
+        .analyzeResponse(modifiedResponseBytes).getStatusCode();
 
     // Request ID
     this.requestResponseId = requestResponseId;
@@ -218,13 +227,13 @@ public class LogEntry {
     this.originalRequestResponse = originalRequestResponse;
     this.originalURL = originalAnalyzedRequest.getUrl();
     this.originalMethod = originalAnalyzedRequest.getMethod();
-    this.originalLength = originalRequestResponse.getResponse().length;
+    this.originalLength = originalResponseBytes.length;
 
     // Modified Request Info
     this.modifiedRequestResponse = modifiedRequestResponse;
     this.modifiedURL = modifiedAnalyzedRequest.getUrl();
     this.modifiedMethod = modifiedAnalyzedRequest.getMethod();
-    this.modifiedLength = modifiedRequestResponse.getResponse().length;
+    this.modifiedLength = modifiedResponseBytes.length;
 
     // Comparisons
     this.lengthDifference = Math.abs(this.originalLength - this.modifiedLength);

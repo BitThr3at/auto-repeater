@@ -2,6 +2,7 @@ package burp.Conditions;
 
 import burp.AutoRepeater;
 import burp.BurpExtender;
+import burp.Utils.Utils;
 import java.awt.Color;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
@@ -202,8 +203,9 @@ public class Conditions {
 
     conditionTableModel = new ConditionTableModel();
     conditionTable = new JTable(conditionTableModel);
-    conditionTable.getColumnModel().getColumn(0).setMaxWidth(55);
-    conditionTable.getColumnModel().getColumn(0).setMinWidth(55);
+    conditionTable.getColumnModel().getColumn(0).setMaxWidth(60);
+    conditionTable.getColumnModel().getColumn(0).setMinWidth(60);
+    Utils.configureConfigurationTable(conditionTable, 60, 90, 150, 160, 220);
     conditionScrollPane = new JScrollPane(conditionTable);
 
     // Panel containing condition options

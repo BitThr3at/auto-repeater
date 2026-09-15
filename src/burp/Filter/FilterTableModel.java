@@ -1,5 +1,6 @@
 package burp.Filter;
 
+import burp.Conditions.Condition;
 import burp.Conditions.ConditionTableModel;
 import burp.Logs.LogEntry;
 import java.util.ArrayList;
@@ -16,27 +17,34 @@ public class FilterTableModel extends ConditionTableModel {
       "Match Condition"
   };
 
+  /**
+   * Evaluated once per log entry on every insert and on every re-filter, so it walks the conditions
+   * directly instead of building two intermediate lists and two streams per call.
+   */
   public boolean check(LogEntry logEntry) {
-    boolean meetsFilters = false;
-    if (getFilters().size() == 0) {
-      meetsFilters = true;
-    } else {
-      if (getFilters()
-          .stream()
-          .filter(Filter::isEnabled)
-          .filter(f -> f.getBooleanOperator().equals("Or"))
-          .anyMatch(f -> f.checkCondition(logEntry))) {
-        meetsFilters = true;
+    if (getConditions().isEmpty()) {
+      return true;
+    }
+    // An "Or" filter matching is enough; "And"/"" filters must all match. As before, a set with no
+    // enabled "And" filters counts as matching.
+    boolean andMatch = true;
+    ArrayList<Condition> conditions = getConditions();
+    // Indexed loop: filters can be edited while logs are being filtered.
+    for (int i = 0; i < conditions.size(); i++) {
+      Condition condition = conditions.get(i);
+      if (!condition.isEnabled()) {
+        continue;
       }
-      if (getFilters()
-          .stream()
-          .filter(Filter::isEnabled)
-          .filter(f -> f.getBooleanOperator().equals("And") || f.getBooleanOperator().equals(""))
-          .allMatch(f -> f.checkCondition(logEntry))) {
-        meetsFilters = true;
+      Filter filter = (Filter) condition;
+      if ("Or".equals(filter.getBooleanOperator())) {
+        if (filter.checkCondition(logEntry)) {
+          return true;
+        }
+      } else if (andMatch && !filter.checkCondition(logEntry)) {
+        andMatch = false;
       }
     }
-    return meetsFilters;
+    return andMatch;
   }
 
   public ArrayList<Filter> getFilters() {

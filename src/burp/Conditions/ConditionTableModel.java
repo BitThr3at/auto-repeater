@@ -30,28 +30,33 @@ public class ConditionTableModel extends AbstractTableModel {
     conditions.set(index, condition);
   }
 
+  /**
+   * Runs for every message Burp sees, so it walks the conditions once and stops as soon as the
+   * result is known rather than building two streams per call.
+   */
   public boolean check(int toolFlag, IHttpRequestResponse messageInfo) {
-    boolean meetsConditions = false;
-    if (getConditions().size() == 0) {
-      meetsConditions = false;
-    } else {
-      if (getConditions()
-          .stream()
-          .filter(Condition::isEnabled)
-          .filter(c -> c.getBooleanOperator().equals("Or"))
-          .anyMatch(c -> c.checkCondition(toolFlag, messageInfo))) {
-        meetsConditions = true;
+    if (conditions.isEmpty()) {
+      return false;
+    }
+    // An "Or" condition matching is enough; "And"/"" conditions must all match. As before, a set
+    // with no enabled "And" conditions counts as matching.
+    boolean andMatch = true;
+    // Indexed loop: this runs on Burp's HTTP threads while the table may be edited on the event
+    // thread, and an iterator would throw ConcurrentModificationException.
+    for (int i = 0; i < conditions.size(); i++) {
+      Condition condition = conditions.get(i);
+      if (!condition.isEnabled()) {
+        continue;
       }
-      if (getConditions()
-          .stream()
-          .filter(Condition::isEnabled)
-          .filter(
-              c -> c.getBooleanOperator().equals("And") || c.getBooleanOperator().equals(""))
-          .allMatch(c -> c.checkCondition(toolFlag, messageInfo))) {
-        meetsConditions = true;
+      if ("Or".equals(condition.getBooleanOperator())) {
+        if (condition.checkCondition(toolFlag, messageInfo)) {
+          return true;
+        }
+      } else if (andMatch && !condition.checkCondition(toolFlag, messageInfo)) {
+        andMatch = false;
       }
     }
-    return meetsConditions;
+    return andMatch;
   }
 
   public ArrayList<Condition> getConditions() {
