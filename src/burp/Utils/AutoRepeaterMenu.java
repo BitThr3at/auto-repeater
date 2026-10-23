@@ -6,8 +6,6 @@ import burp.IExtensionStateListener;
 import burp.Logs.LogEntry;
 import burp.Logs.LogManager;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import javax.swing.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
@@ -21,39 +19,13 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
   private static java.util.List<AutoRepeater> autoRepeaters;
 
   private static JMenu autoRepeaterJMenu;
-  private static JMenuItem toggleSettingsVisibility;
-
-  private static boolean showSettingsPanel;
-
   public static boolean sendRequestsToPassiveScanner;
   public static boolean addRequestsToSiteMap;
 
   public AutoRepeaterMenu(JRootPane rootPane) {
     this.rootPane = rootPane;
     autoRepeaters = BurpExtender.getAutoRepeaters();
-    showSettingsPanel = true;
     BurpExtender.getCallbacks().registerExtensionStateListener(this);
-  }
-
-  /**
-   * Action listener for setting visibility
-   */
-  class SettingVisibilityListener implements ActionListener {
-    @Override
-    public void actionPerformed(ActionEvent e) {
-      // Toggling settings panel
-      if (toggleSettingsVisibility.getText().equals("Hide Settings Panel")) {
-        showSettingsPanel = false;
-        toggleSettingsVisibility.setText("Show Settings Panel");
-      } else {
-        showSettingsPanel = true;
-        toggleSettingsVisibility.setText("Hide Settings Panel");
-      }
-      // toggling every AutoRepeater tab
-      for (AutoRepeater ar : autoRepeaters) {
-        ar.toggleConfigurationPane(showSettingsPanel);
-      }
-    }
   }
 
   /**
@@ -64,11 +36,6 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
     @Override
     public void actionPerformed(ActionEvent e) {
       final JFileChooser importPathChooser = new JFileChooser();
-      int replaceTabs = JOptionPane.showConfirmDialog(rootPane, "Would you like to replace the current tabs?", "Replace Tabs", JOptionPane.YES_NO_CANCEL_OPTION);
-      if (replaceTabs == 2) {
-        // cancel selected
-        return;
-      }
       int returnVal = importPathChooser.showOpenDialog(rootPane);
       if (returnVal != JFileChooser.APPROVE_OPTION) {
         BurpExtender.getCallbacks().printOutput("Cannot open a file dialog for importing settings.");
@@ -80,14 +47,7 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
         // file empty
         return;
       }
-      if (replaceTabs == 1) {
-        // do not replace current tabs
-        BurpExtender.initializeFromSave(fileData, false);
-      } else if (replaceTabs == 0) {
-        // replace current tabs
-        BurpExtender.getCallbacks().printOutput("Removing Tabs");
-        BurpExtender.initializeFromSave(fileData, true);
-      }
+      BurpExtender.initializeFromSave(fileData);
     }
   }
 
@@ -97,10 +57,6 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
   class ExportSettingListener implements ActionListener {
     @Override
     public void actionPerformed(ActionEvent e) {
-      Object[] options = {"Current Tab", "Every Tab", "Cancel"};
-      int option = JOptionPane.showOptionDialog(rootPane, "Which tab would you like to export?", "Export Tabs",
-          JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
-      if (option == 2) { return; }
       final JFileChooser exportPathChooser = new JFileChooser();
       int returnVal = exportPathChooser.showSaveDialog(rootPane);
       if (returnVal != JFileChooser.APPROVE_OPTION) {
@@ -109,13 +65,7 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
       }
       File file = exportPathChooser.getSelectedFile();
       try (PrintWriter out = new PrintWriter(file.getAbsolutePath())) {
-        if (option == 0) {
-          // export current tab
-          out.println(BurpExtender.exportSave(BurpExtender.getSelectedAutoRepeater()));
-        } else if (option == 1) {
-          // export every tab
-          out.println(BurpExtender.exportSave());
-        }
+        out.println(BurpExtender.exportSave());
       } catch (FileNotFoundException error) {
         error.printStackTrace();
       }
@@ -131,7 +81,7 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
     public void actionPerformed(ActionEvent e) {
       Object[] options = {"Export", "Cancel"};
       final String[] EXPORT_OPTIONS = {"CSV", "JSON"};
-      final String[] EXPORT_WHICH_OPTIONS = {"All Tab Logs", "Selected Tab Logs"};
+      final String[] EXPORT_WHICH_OPTIONS = {"All Logs", "Selected Logs"};
       final String[] EXPORT_VALUE_OPTIONS = {"Log Entry", "Log Entry + Full HTTP Request"};
 
       final JComboBox<String> exportTypeComboBox = new JComboBox<>(EXPORT_OPTIONS);
@@ -158,14 +108,14 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
         BurpExtender.getCallbacks().printOutput("Cannot open a file dialog for exporting logs.");
         return;
       }
-      AutoRepeater autoRepeater = BurpExtender.getSelectedAutoRepeater();
+      AutoRepeater autoRepeater = BurpExtender.getAutoRepeater();
       LogManager logManager = autoRepeater.getLogManager();
       File file = exportLogsPathChooser.getSelectedFile();
       final ArrayList<LogEntry> logEntries = new ArrayList<>();
       // collect relevant entries
-      if ((exportWhichComboBox.getSelectedItem()).equals("All Tab Logs")) {
+      if ((exportWhichComboBox.getSelectedItem()).equals("All Logs")) {
         logEntries.addAll(autoRepeater.getLogTableModel().getLog());
-      } else if ((exportWhichComboBox.getSelectedItem()).equals("Selected Tab Logs")) {
+      } else if ((exportWhichComboBox.getSelectedItem()).equals("Selected Logs")) {
         int[] selectedRows = autoRepeater.getLogTable().getSelectedRows();
         for (int row : selectedRows) {
           logEntries.add(logManager.getLogEntry(autoRepeater.getLogTable().convertRowIndexToModel(row)));
@@ -194,17 +144,6 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
     }
   }
 
-  class DuplicateCurrentTabListener implements ActionListener {
-
-    @Override
-    public void actionPerformed(ActionEvent e) {
-      JsonArray serializedTab = BurpExtender.exportSaveAsJson(BurpExtender.getSelectedAutoRepeater());
-      for (JsonElement tabConfiguration : serializedTab) {
-        BurpExtender.addNewTab(tabConfiguration.getAsJsonObject());
-      }
-    }
-  }
-
   @Override
   public void extensionUnloaded() {
     // unregister menu
@@ -219,11 +158,6 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
     JMenuBar burpJMenuBar = rootPane.getJMenuBar();
     autoRepeaterJMenu = new JMenu("AutoRepeater");
     // initialize menu items and add action listeners
-    JMenuItem duplicateCurrentTab = new JMenuItem("Duplicate Selected Tab");
-    duplicateCurrentTab.addActionListener(new DuplicateCurrentTabListener());
-
-    toggleSettingsVisibility = new JMenuItem("Hide Settings Panel");
-    toggleSettingsVisibility.addActionListener(new SettingVisibilityListener());
     JCheckBoxMenuItem toggleSendRequestsToPassiveScanner = new JCheckBoxMenuItem("Send Requests To Passive Scanner");
     toggleSendRequestsToPassiveScanner.addActionListener(l ->
         sendRequestsToPassiveScanner = toggleSendRequestsToPassiveScanner.getState());
@@ -241,9 +175,6 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
     JMenuItem showExportLogsMenu = new JMenuItem("Export Logs");
     showExportLogsMenu.addActionListener(new ExportLogsListener());
     // add menu items to the menu
-    autoRepeaterJMenu.add(duplicateCurrentTab);
-    autoRepeaterJMenu.add(toggleSettingsVisibility);
-    autoRepeaterJMenu.addSeparator();
     autoRepeaterJMenu.add(toggleAddRequestsToSiteMap);
     autoRepeaterJMenu.add(toggleSendRequestsToPassiveScanner);
     autoRepeaterJMenu.addSeparator();

@@ -19,8 +19,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import javax.swing.*;
 import javax.swing.Timer;
-import javax.swing.event.DocumentEvent;
-import javax.swing.event.DocumentListener;
 
 public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContextMenuFactory {
 
@@ -29,17 +27,12 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
   private static IExtensionHelpers helpers;
   private static Gson gson;
 
-  private static JTabbedPane mainTabbedPane;
   private static JTabbedPane parentTabbedPane;
-  private static JPanel newTabButton;
   private static AutoRepeaterMenu autoRepeaterMenu;
   private ExecutorService executor;
-  //private static ResponseStore responseStore;
 
-  // Global state variables
-  private static int tabCounter = 0;
-  private static boolean tabChangeListenerLock = false;
-  // Iterated on Burp's HTTP threads while tabs are added/removed on the event thread.
+  // The single, global AutoRepeater. Kept in a list because Burp's HTTP threads iterate it.
+  private static AutoRepeater autoRepeater;
   private static CopyOnWriteArrayList<AutoRepeater> autoRepeaters;
 
   @Override
@@ -66,32 +59,14 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
     executor = threadPoolExecutor;
     // create our UI
     SwingUtilities.invokeLater(() -> {
-      mainTabbedPane = new JTabbedPane();
-      newTabButton = new JPanel();
-      newTabButton.setName("...");
-      mainTabbedPane = new JTabbedPane();
-      mainTabbedPane.add(newTabButton);
       // If there is a saved extensionSetting load it.
       String b64ConfigurationJson = callbacks.loadExtensionSetting(getTabCaption());
       if (b64ConfigurationJson != null) {
-        initializeFromSave(b64ConfigurationJson, true);
-      } else {
-        addNewTab();
+        initializeFromSave(b64ConfigurationJson);
       }
-      mainTabbedPane.addChangeListener(e -> {
-        // Make all tabname not editable whenever the tab is changed
-        if (!tabChangeListenerLock) {
-          if (mainTabbedPane.getSelectedIndex() == mainTabbedPane.getTabCount() - 1) {
-            if (!tabChangeListenerLock) {
-              addNewTab();
-            }
-          }
-        }
-        for (int i = 0; i < mainTabbedPane.getTabCount() - 1; i++) {
-          AutoRepeaterTabHandle arth = (AutoRepeaterTabHandle) mainTabbedPane.getTabComponentAt(i);
-          arth.tabName.setEditable(false);
-        }
-      });
+      if (autoRepeater == null) {
+        setAutoRepeater(new AutoRepeater());
+      }
 
       // Set Extension Name
       callbacks.setExtensionName("AutoRepeater");
@@ -143,40 +118,14 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
   }
 
   public static String exportSave() {
-    JsonArray BurpExtenderJson = new JsonArray();
-    // Don't count the "..." tab
-    for (int i = 0; i < mainTabbedPane.getTabCount() - 1; i++) {
-      AutoRepeaterTabHandle autoRepeaterTabHandle
-          = (AutoRepeaterTabHandle) mainTabbedPane.getTabComponentAt(i);
-      AutoRepeater ar = autoRepeaterTabHandle.autoRepeater;
-      JsonObject AutoRepeaterJson = ar.toJson();
-      AutoRepeaterJson.addProperty("tabName", autoRepeaterTabHandle.tabName.getText());
-      BurpExtenderJson.add(AutoRepeaterJson);
-    }
-    return BurpExtenderJson.toString();
+    return autoRepeater.toJson().toString();
   }
 
-  public static String exportSave(AutoRepeater ar) {
-    return exportSaveAsJson(ar).toString();
-  }
-
-  public static JsonArray exportSaveAsJson(AutoRepeater ar) {
-    JsonArray BurpExtenderJson = new JsonArray();
-    // Don't count the "..." tab
-    for (int i = 0; i < mainTabbedPane.getTabCount() - 1; i++) {
-      AutoRepeaterTabHandle autoRepeaterTabHandle
-          = (AutoRepeaterTabHandle) mainTabbedPane.getTabComponentAt(i);
-      AutoRepeater tempAR = autoRepeaterTabHandle.autoRepeater;
-      if (ar.equals(tempAR)) {
-        JsonObject AutoRepeaterJson = tempAR.toJson();
-        AutoRepeaterJson.addProperty("tabName", autoRepeaterTabHandle.tabName.getText());
-        BurpExtenderJson.add(AutoRepeaterJson);
-      }
-    }
-    return BurpExtenderJson;
-  }
-
-  public static void initializeFromSave(String configuration, boolean replaceTabs) {
+  /**
+   * Loads a saved configuration. Older saves are an array with one object per tab; only the
+   * first is used now that the configuration is global.
+   */
+  public static void initializeFromSave(String configuration) {
     getCallbacks().printOutput("Loading Stored AutoRepeater Configuration");
     String configurationJson;
     // Check if the configuration is B64 encoded for legacy.
@@ -185,56 +134,40 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
     } catch (IllegalArgumentException e) {
       configurationJson = configuration;
     }
-    JsonParser jsonParser = new JsonParser();
-    JsonArray tabConfigurations = jsonParser.parse(configurationJson).getAsJsonArray();
-    if (replaceTabs) {
-      closeAllTabs();
+    JsonElement parsed = new JsonParser().parse(configurationJson);
+    JsonObject tabConfiguration = null;
+    if (parsed.isJsonArray()) {
+      if (parsed.getAsJsonArray().size() > 0) {
+        tabConfiguration = parsed.getAsJsonArray().get(0).getAsJsonObject();
+      }
+    } else if (parsed.isJsonObject()) {
+      tabConfiguration = parsed.getAsJsonObject();
     }
-    for (JsonElement tabConfiguration : tabConfigurations) {
-      addNewTab(tabConfiguration.getAsJsonObject());
+    if (tabConfiguration == null) {
+      return;
+    }
+    if (autoRepeater == null) {
+      setAutoRepeater(new AutoRepeater(tabConfiguration));
+    } else {
+      // Keep the instance: its UI is the tab Burp already shows.
+      autoRepeater.loadConfiguration(tabConfiguration);
     }
   }
 
-  public static void addNewTab(JsonObject tabContents) {
-    String tabName = tabContents.get("tabName").getAsString();
-    tabChangeListenerLock = true;
-    tabCounter += 1;
-    AutoRepeater autoRepeater = new AutoRepeater(tabContents);
-    autoRepeaters.add(autoRepeater);
-    mainTabbedPane.add(autoRepeater.getUI());
-    AutoRepeaterTabHandle autoRepeaterTabHandle = new AutoRepeaterTabHandle(tabName, autoRepeater);
-    mainTabbedPane.setTabComponentAt(mainTabbedPane.indexOfComponent(autoRepeater.getUI()),
-        autoRepeaterTabHandle);
-    // Hack to steal and remove focus
-    mainTabbedPane.remove(newTabButton);
-    mainTabbedPane.add(newTabButton);
-    tabChangeListenerLock = false;
-  }
-
-  private static void addNewTab() {
-    tabChangeListenerLock = true;
-    tabCounter += 1;
-    AutoRepeater autoRepeater = new AutoRepeater();
-    autoRepeaters.add(autoRepeater);
-    mainTabbedPane.add(autoRepeater.getUI());
-    AutoRepeaterTabHandle autoRepeaterTabHandle = new AutoRepeaterTabHandle(
-        Integer.toString(tabCounter), autoRepeater);
-    mainTabbedPane.setTabComponentAt(mainTabbedPane.indexOfComponent(autoRepeater.getUI()),
-        autoRepeaterTabHandle);
-    // Hack to steal and remove focus
-    mainTabbedPane.remove(newTabButton);
-    mainTabbedPane.add(newTabButton);
-    tabChangeListenerLock = false;
+  private static void setAutoRepeater(AutoRepeater newAutoRepeater) {
+    autoRepeaters.clear();
+    autoRepeater = newAutoRepeater;
+    autoRepeaters.add(newAutoRepeater);
   }
 
   public static void highlightTab() {
     if (parentTabbedPane != null) {
       for (int i = 0; i < parentTabbedPane.getTabCount(); i++) {
-        if (parentTabbedPane.getComponentAt(i).equals(mainTabbedPane)) {
+        if (parentTabbedPane.getComponentAt(i).equals(autoRepeater.getUI())) {
           parentTabbedPane.setBackgroundAt(i, Utils.getBurpOrange());
           Timer timer = new Timer(3000, e -> {
             for (int j = 0; j < parentTabbedPane.getTabCount(); j++) {
-              if (parentTabbedPane.getComponentAt(j).equals(mainTabbedPane)) {
+              if (parentTabbedPane.getComponentAt(j).equals(autoRepeater.getUI())) {
                 parentTabbedPane.setBackgroundAt(j, Color.BLACK);
                 break;
               }
@@ -256,7 +189,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
 
   @Override
   public Component getUiComponent() {
-    return mainTabbedPane;
+    return autoRepeater.getUI();
   }
 
   // implement IHttpListener
@@ -279,139 +212,8 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
     }
   }
 
-  public static void closeAllTabs() {
-    tabChangeListenerLock = true;
-    int tabCount = mainTabbedPane.getTabCount() - 1;
-    for (int i = 0; i < tabCount; i++) {
-      if (mainTabbedPane.getTabComponentAt(0).getClass().equals(AutoRepeaterTabHandle.class)) {
-        try {
-          AutoRepeaterTabHandle arth = (AutoRepeaterTabHandle) mainTabbedPane.getTabComponentAt(0);
-          autoRepeaters.remove(arth.autoRepeater);
-          mainTabbedPane.remove(0);
-        } catch (Exception e) {
-          getCallbacks().printOutput(e.getMessage());
-        }
-      }
-    }
-    tabChangeListenerLock = false;
-  }
-
-  private static class AutoRepeaterTabHandle extends JPanel {
-
-    AutoRepeater autoRepeater;
-    JTextField tabName;
-
-    public AutoRepeaterTabHandle(String title, AutoRepeater autoRepeater) {
-      this.autoRepeater = autoRepeater;
-      this.setLayout(new FlowLayout(FlowLayout.LEFT, 2, 0));
-      this.setOpaque(false);
-      tabName = new JTextField(title);
-      tabName.setOpaque(false);
-      tabName.setBorder(null);
-      tabName.setBackground(new Color(0, 0, 0, 0));
-      tabName.setEditable(false);
-      // Follows the theme: a black caret is invisible on Burp's dark themes.
-      tabName.setCaretColor(UIManager.getColor("TabbedPane.foreground"));
-      tabName.setToolTipText("Click the selected tab's name to rename it");
-      tabName.setColumns(Math.max(4, title.length()));
-
-      this.add(tabName);
-      JButton closeButton = new JButton("✕");
-      closeButton.setFont(closeButton.getFont().deriveFont(Font.PLAIN, 10f));
-      closeButton.setBorder(BorderFactory.createEmptyBorder(1, 2, 1, 2));
-      closeButton.setForeground(UIManager.getColor("Label.disabledForeground"));
-      closeButton.setToolTipText("Close this AutoRepeater tab");
-
-      closeButton.setBorderPainted(false);
-      closeButton.setContentAreaFilled(false);
-      closeButton.setOpaque(false);
-
-      // Fix tabname redraw lag.
-      JPanel parent = this;
-      tabName.getDocument().addDocumentListener(
-          new DocumentListener() {
-            @Override
-            public void insertUpdate(DocumentEvent e) {
-              tabName.repaint();
-              parent.validate();
-            }
-
-            @Override
-            public void removeUpdate(DocumentEvent e) {
-              tabName.repaint();
-              parent.validate();
-            }
-
-            @Override
-            public void changedUpdate(DocumentEvent e) {
-              tabName.repaint();
-              parent.validate();
-            }
-          });
-
-      tabName.addMouseListener(new MouseAdapter() {
-        @Override
-        public void mouseClicked(MouseEvent e) {
-          if (!mainTabbedPane.getSelectedComponent().equals(autoRepeater.getUI())) {
-            mainTabbedPane.setSelectedComponent(autoRepeater.getUI());
-            for (int i = 0; i < mainTabbedPane.getTabCount() - 2; i++) {
-              if (!mainTabbedPane.getComponentAt(i).equals(autoRepeater.getUI())) {
-                AutoRepeaterTabHandle autoRepeaterTabHandle =
-                    (AutoRepeaterTabHandle) mainTabbedPane.getTabComponentAt(i);
-                autoRepeaterTabHandle.tabName.setEditable(false);
-              }
-            }
-          } else {
-            mainTabbedPane.setSelectedComponent(autoRepeater.getUI());
-            tabName.setEditable(true);
-          }
-        }
-
-        @Override
-        public void mousePressed(MouseEvent e) {
-          if (!mainTabbedPane.getSelectedComponent().equals(autoRepeater.getUI())) {
-            mainTabbedPane.setSelectedComponent(autoRepeater.getUI());
-            for (int i = 0; i < mainTabbedPane.getTabCount() - 2; i++) {
-              if (!mainTabbedPane.getComponentAt(i).equals(autoRepeater.getUI())) {
-                AutoRepeaterTabHandle arth = (AutoRepeaterTabHandle) mainTabbedPane
-                    .getTabComponentAt(i);
-                arth.tabName.setEditable(false);
-              }
-            }
-          } else {
-            mainTabbedPane.setSelectedComponent(autoRepeater.getUI());
-          }
-        }
-      });
-
-      closeButton.addActionListener(e -> {
-        tabChangeListenerLock = true;
-        if (mainTabbedPane.getSelectedComponent().equals(autoRepeater.getUI())) {
-          if (mainTabbedPane.getTabCount() == 2) {
-            mainTabbedPane.remove(autoRepeater.getUI());
-            autoRepeaters.remove(autoRepeater);
-            addNewTab();
-            tabChangeListenerLock = true;
-          } else if (mainTabbedPane.getTabCount() > 2) {
-            mainTabbedPane.remove(autoRepeater.getUI());
-            autoRepeaters.remove(autoRepeater);
-          }
-          if (mainTabbedPane.getSelectedIndex() == mainTabbedPane.getTabCount() - 1) {
-            mainTabbedPane.setSelectedIndex(mainTabbedPane.getTabCount() - 2);
-          }
-        } else {
-          mainTabbedPane.setSelectedComponent(autoRepeater.getUI());
-        }
-        tabChangeListenerLock = false;
-      });
-      this.add(closeButton);
-    }
-
-  }
-
-  public static AutoRepeater getSelectedAutoRepeater() {
-    AutoRepeaterTabHandle autoRepeaterTabHandle = (AutoRepeaterTabHandle) mainTabbedPane.getTabComponentAt(mainTabbedPane.getSelectedIndex());
-    return autoRepeaterTabHandle.autoRepeater;
+  public static AutoRepeater getAutoRepeater() {
+    return autoRepeater;
   }
 
   public static IBurpExtenderCallbacks getCallbacks() {
