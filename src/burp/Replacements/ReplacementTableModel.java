@@ -41,6 +41,11 @@ public class ReplacementTableModel extends AbstractTableModel {
         .collect(Collectors.toCollection(ArrayList::new));
   }
 
+  public void clear() {
+    replacements.clear();
+    fireTableDataChanged();
+  }
+
   public void deleteReplacement(int replacementIndex) {
     replacements.remove(replacementIndex);
   }

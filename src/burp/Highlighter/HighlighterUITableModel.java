@@ -28,6 +28,11 @@ public class HighlighterUITableModel extends AbstractTableModel {
     return tableModels.get(index);
   }
 
+  public void clear() {
+    tableModels.clear();
+    fireTableDataChanged();
+  }
+
   public void remove(int index) {
     tableModels.remove(index);
   }

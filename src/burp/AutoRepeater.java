@@ -47,6 +47,7 @@ import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.TableModel;
+import javax.swing.table.TableColumn;
 import javax.swing.table.TableRowSorter;
 import javax.swing.text.StyledDocument;
 
@@ -64,7 +65,6 @@ public class AutoRepeater implements IMessageEditorController {
   public static final Dimension buttonPanelDimension = new Dimension(96, TEXT_HEIGHT*7);
   public static final Dimension tableDimension = new Dimension(200, 300);
   // The configuration tables need room, otherwise every column header is truncated.
-  public static final Dimension configurationPaneDimension = new Dimension(620, 260);
 
   private IBurpExtenderCallbacks callbacks;
   private IExtensionHelpers helpers;
@@ -79,7 +79,6 @@ public class AutoRepeater implements IMessageEditorController {
   private JSplitPane modifiedRequestResponseSplitPane;
 
   // this split pane holds the request list and configuration panes
-  private JSplitPane userInterfaceSplitPane;
 
   private LogTable logTable;
   private TableRowSorter<LogTableModel> logTableSorter;
@@ -147,6 +146,8 @@ public class AutoRepeater implements IMessageEditorController {
 
   // The tabbed pane that holds the configuration options
   private JPanel configurationPane;
+  // Activate toggle and status, shown in the log toolbar so they stay visible on every tab
+  private JPanel activatedPanel;
   private JTabbedPane configurationTabbedPane;
 
   // The button that indicates weather AutoRepeater is active.
@@ -192,9 +193,17 @@ public class AutoRepeater implements IMessageEditorController {
 
   public AutoRepeater(JsonObject configurationJson) {
     this();
-    // clear out the conditions from the default constructor
+    loadConfiguration(configurationJson);
+  }
+
+  /** Replaces the current configuration (not the log) with the one in the given json. */
+  public void loadConfiguration(JsonObject configurationJson) {
+    // clear out everything, including the defaults from the constructor
     conditionsTableModel.clear();
     filterTableModel.clear();
+    baseReplacementsTableModel.clear();
+    replacementsTableModel.clear();
+    highlighterUITableModel.clear();
     // Initialize singular properties
     if (configurationJson.get("isActivated") != null) {
       activatedButton.setSelected(configurationJson.get("isActivated").getAsBoolean());
@@ -253,6 +262,8 @@ public class AutoRepeater implements IMessageEditorController {
     if(filterTableModel.getFilters().size() == 0) {
       setDefaultFilters();
     }
+    conditionsTableModel.fireTableDataChanged();
+    filterTableModel.fireTableDataChanged();
   }
 
   public void setDefaultConditions() {
@@ -384,24 +395,13 @@ public class AutoRepeater implements IMessageEditorController {
         "When active, every message matching the conditions below is replayed with the replacements applied");
     activatedStatusLabel.setFont(Utils.getHeaderFont(activatedStatusLabel.getFont()));
 
-    JPanel activatedPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+    activatedPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
     activatedPanel.add(activatedButton);
     activatedPanel.add(activatedStatusLabel);
 
     configurationPane = new JPanel();
-    configurationPane.setLayout(new GridBagLayout());
-    configurationPane.setMinimumSize(configurationPaneDimension);
-    configurationPane.setPreferredSize(configurationPaneDimension);
-    c = new GridBagConstraints();
-    c.anchor = GridBagConstraints.NORTHWEST;
-    c.insets = new Insets(4, 4, 4, 4);
-    configurationPane.add(activatedPanel, c);
-    c.fill = GridBagConstraints.BOTH;
-    c.weightx = 1;
-    c.weighty = 1;
-    c.gridy = 1;
-
-    configurationPane.add(configurationTabbedPane, c);
+    configurationPane.setLayout(new BorderLayout());
+    configurationPane.add(configurationTabbedPane, BorderLayout.CENTER);
     JTabbedPane replacementsTabbedPane = new JTabbedPane();
     JTabbedPane logsTabbedPane = new JTabbedPane();
 
@@ -429,16 +429,21 @@ public class AutoRepeater implements IMessageEditorController {
     logTable.setIntercellSpacing(new Dimension(0, 1));
     logTable.setRowHeight(Math.max(logTable.getRowHeight(), TEXT_HEIGHT));
     logTable.getTableHeader().setReorderingAllowed(false);
-    logTable.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
+    // Every column except the URL has a fixed upper bound, so the URL absorbs all spare width.
+    logTable.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
 
-    logTable.getColumnModel().getColumn(0).setPreferredWidth(50);
-    logTable.getColumnModel().getColumn(1).setPreferredWidth(70);
-    logTable.getColumnModel().getColumn(2).setPreferredWidth(420);
-    logTable.getColumnModel().getColumn(3).setPreferredWidth(90);
-    logTable.getColumnModel().getColumn(4).setPreferredWidth(70);
-    logTable.getColumnModel().getColumn(5).setPreferredWidth(120);
-    logTable.getColumnModel().getColumn(6).setPreferredWidth(90);
-    logTable.getColumnModel().getColumn(7).setPreferredWidth(110);
+    // preferred widths; column 2 (URL) is unbounded
+    final int[] columnWidths = {50, 70, 420, 100, 70, 100, 100, 120};
+    for (int i = 0; i < columnWidths.length; i++) {
+      TableColumn column = logTable.getColumnModel().getColumn(i);
+      column.setPreferredWidth(columnWidths[i]);
+      if (i != 2) {
+        column.setMinWidth(columnWidths[i]);
+        column.setMaxWidth(columnWidths[i]);
+      } else {
+        column.setMinWidth(150);
+      }
+    }
 
     JScrollPane logTableScrollPane = new JScrollPane(logTable);
     logTableScrollPane.setBorder(BorderFactory.createEmptyBorder());
@@ -616,18 +621,15 @@ public class AutoRepeater implements IMessageEditorController {
     lineDiffSplitPane.setResizeWeight(0.50);
     tabs.addTab("Line Diff", lineDiffSplitPane);
 
+    // Global configuration lives next to the viewers so the log table can use the full width
+    tabs.addTab("Configuration", configurationPane);
+
     // Both halves grow with the window. The old weight of 1e-14 gave every extra pixel to the
     // request viewers and left the log table stuck at its initial height.
     mainSplitPane.setResizeWeight(0.35);
     mainSplitPane.setBottomComponent(tabs);
 
-    // Split pane containing user interface components
-    userInterfaceSplitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
-
-    userInterfaceSplitPane.setRightComponent(configurationPane);
-    userInterfaceSplitPane.setLeftComponent(logPanel);
-    userInterfaceSplitPane.setResizeWeight(1.0);
-    mainSplitPane.setTopComponent(userInterfaceSplitPane);
+    mainSplitPane.setTopComponent(logPanel);
 
     // Keep the split panes at the bottom the same size.
     originalRequestResponseSplitPane.addPropertyChangeListener(JSplitPane.DIVIDER_LOCATION_PROPERTY,
@@ -753,14 +755,6 @@ public class AutoRepeater implements IMessageEditorController {
 
   public LogTableModel getLogTableModel() {
     return logManager.getLogTableModel();
-  }
-
-  public void toggleConfigurationPane(boolean visible) {
-    if (visible) {
-      userInterfaceSplitPane.setRightComponent(configurationPane);
-    } else {
-      userInterfaceSplitPane.remove(configurationPane);
-    }
   }
 
   // Implement IMessageEditorController. Burp calls these before anything is selected, hence the
@@ -936,8 +930,11 @@ public class AutoRepeater implements IMessageEditorController {
       case 2:
         updateDiffViewer();
         break;
-      default:
+      case 3:
         updateLineDiffViewer();
+        break;
+      default:
+        // Configuration tab: nothing to refresh
         break;
     }
   }
@@ -1008,6 +1005,7 @@ public class AutoRepeater implements IMessageEditorController {
     c.gridy = 0;
     c.insets = new Insets(0, 0, 0, 6);
     c.anchor = GridBagConstraints.LINE_START;
+    toolbar.add(activatedPanel, c);
     toolbar.add(new JLabel("Search:"), c);
     c.fill = GridBagConstraints.HORIZONTAL;
     c.weightx = 1;
