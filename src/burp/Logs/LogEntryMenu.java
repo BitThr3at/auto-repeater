@@ -3,6 +3,7 @@ package burp.Logs;
 import burp.AutoRepeater.LogTable;
 import burp.BurpExtender;
 import burp.Filter.Filters;
+import com.google.common.io.Files;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
@@ -64,6 +65,24 @@ public class LogEntryMenu extends JPopupMenu {
     });
     filterOut.setEnabled(url != null);
     add(filterOut);
+
+    final String extension = url == null ? "" : Files.getFileExtension(url.getPath());
+    JMenuItem filterOutExtension = new JMenuItem(new AbstractAction(
+        extension.isEmpty() ? "Filter out this extension" : "Filter out ." + extension + " requests") {
+      @Override
+      public void actionPerformed(ActionEvent actionEvent) {
+        filters.excludeExtension(extension);
+      }
+    });
+    filterOutExtension.setEnabled(!extension.isEmpty());
+    add(filterOutExtension);
+
+    add(new JMenuItem(new AbstractAction("Filter to in-scope only") {
+      @Override
+      public void actionPerformed(ActionEvent actionEvent) {
+        filters.filterInScopeOnly();
+      }
+    }));
 
     add(new JMenuItem(new AbstractAction("Clear Logs") {
       @Override

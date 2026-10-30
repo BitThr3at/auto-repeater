@@ -154,7 +154,7 @@ public class Condition {
       case "HTTP Method":
         return new String[]{"Matches", "Does Not Match"};
       case "URL":
-        return new String[]{"Matches", "Does Not Match", "Is In Scope"};
+        return new String[]{"Matches", "Does Not Match", "Is In Scope", "Is Not In Scope"};
       case "File Extension":
         return new String[]{"Matches", "Does Not Match"};
       case "Request":
@@ -384,6 +384,8 @@ public class Condition {
     switch (this.matchRelationship) {
       case "Is In Scope":
         return BurpExtender.getCallbacks().isInScope(analyzedRequest.getUrl());
+      case "Is Not In Scope":
+        return !BurpExtender.getCallbacks().isInScope(analyzedRequest.getUrl());
       case "Matches":
         return matchesFully(analyzedRequest.getUrl().toString());
       default:

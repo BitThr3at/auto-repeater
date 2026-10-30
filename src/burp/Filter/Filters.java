@@ -97,6 +97,32 @@ public class Filters {
   }
 
   /**
+   * Adds a filter that drops every entry whose (modified) URL ends with the given extension
+   * (case-insensitive, no leading dot expected, e.g. "js" or "css").
+   */
+  public void excludeExtension(String extension) {
+    String regex = "(?i)" + Pattern.quote(extension);
+    Filter filter = isWhitelist
+        ? new Filter("And", "Modified", "File Extension", "Does Not Match", regex)
+        : new Filter("Or", "Modified", "File Extension", "Matches", regex);
+    filterTableModel.add(filter);
+    filterTableModel.fireTableDataChanged();
+  }
+
+  /**
+   * Adds a filter that keeps only entries whose (modified) request targets a URL in Burp's
+   * current scope. A single "And" filter's result is used directly regardless of whitelist or
+   * blacklist mode, so the relationship is flipped to get the same visible behaviour either way.
+   */
+  public void filterInScopeOnly() {
+    Filter filter = isWhitelist
+        ? new Filter("And", "Modified", "URL", "Is In Scope", "")
+        : new Filter("And", "Modified", "URL", "Is Not In Scope", "");
+    filterTableModel.add(filter);
+    filterTableModel.fireTableDataChanged();
+  }
+
+  /**
    * Checked before a filter is created/updated: a bad regex is already handled gracefully at
    * match time, but silently adding a filter that can never match is poor feedback.
    */
