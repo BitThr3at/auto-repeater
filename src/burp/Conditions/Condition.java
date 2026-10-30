@@ -395,7 +395,10 @@ public class Condition {
 
   private boolean checkFileExtension(IHttpRequestResponse messageInfo) {
     IRequestInfo analyzedRequest = BurpExtender.getHelpers().analyzeRequest(messageInfo);
-    String fileExtension = Files.getFileExtension(analyzedRequest.getUrl().toString());
+    // getUrl().toString() includes the query string, which can contain dots after the real
+    // extension (e.g. "OPS-002.json?ref=OPS-002") and corrupts the detected extension. The path
+    // alone does not.
+    String fileExtension = Files.getFileExtension(analyzedRequest.getUrl().getPath());
     switch (this.matchRelationship) {
       case "Matches":
         return matchesFully(fileExtension);
