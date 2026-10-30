@@ -246,6 +246,33 @@ public class Condition {
     }
   }
 
+  /**
+   * Whether the match condition text is compiled as a regex for the given match type/relationship.
+   * A bad regex is already handled gracefully at match time (it just matches nothing, see
+   * {@link #matchPattern()}), but the UI should still reject it up front rather than silently
+   * creating a condition/filter that never does anything.
+   */
+  public static boolean matchConditionIsRegex(String matchType, String matchRelationship) {
+    switch (matchType) {
+      case "HTTP Method":
+      case "URL":
+      case "File Extension":
+      case "Cookie Name":
+      case "Cookie Value":
+      case "Any Header":
+      case "Request Body":
+      case "Param Name":
+      case "Param Value":
+        return true;
+      case "String In Request":
+      case "String In Response":
+        return "Matches Regex".equals(matchRelationship)
+            || "Does Not Match Regex".equals(matchRelationship);
+      default:
+        return false;
+    }
+  }
+
   private boolean checkRequestLength(IHttpRequestResponse messageInfo) {
     try {
       int matchInt = Integer.parseInt(this.matchCondition);

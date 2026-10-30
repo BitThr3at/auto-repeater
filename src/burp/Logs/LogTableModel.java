@@ -4,9 +4,17 @@ import burp.Filter.Filters;
 import javax.swing.table.AbstractTableModel;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 
 public class LogTableModel extends AbstractTableModel {
+
+  /**
+   * A long-running capture logs hundreds of requests per second with no limit otherwise, which
+   * eventually exhausts memory. The oldest entries are dropped once this cap is hit.
+   */
+  private static final int MAX_LOG_ROWS = 50_000;
 
   private final ArrayList<LogEntry> log;
   private ArrayList<LogEntry> filteredLogs;
@@ -31,12 +39,39 @@ public class LogTableModel extends AbstractTableModel {
    */
   public void addLogEntries(List<LogEntry> logEntries, List<LogEntry> visibleEntries) {
     log.addAll(logEntries);
+    if (trimToMaxRows()) {
+      // Trimming can drop rows out of the middle of filteredLogs, not just the tail, so a
+      // single "rows inserted" event would leave the table's row count wrong. Repaint it all.
+      fireTableDataChanged();
+      return;
+    }
     if (visibleEntries.isEmpty()) {
       return;
     }
     int firstNewRow = filteredLogs.size();
     filteredLogs.addAll(visibleEntries);
     fireTableRowsInserted(firstNewRow, filteredLogs.size() - 1);
+  }
+
+  /**
+   * Drops the oldest entries once {@link #MAX_LOG_ROWS} is exceeded. Returns true if anything was
+   * dropped, so the caller knows a full-table refresh is needed instead of an incremental one.
+   */
+  private boolean trimToMaxRows() {
+    int overflow = log.size() - MAX_LOG_ROWS;
+    if (overflow <= 0) {
+      return false;
+    }
+    List<LogEntry> removed = new ArrayList<>(log.subList(0, overflow));
+    log.subList(0, overflow).clear();
+    if (!filteredLogs.isEmpty()) {
+      // Identity, not equals(): LogEntry has no value-based equality, and identity is what
+      // "the same logged request" actually means here.
+      Set<LogEntry> removedSet = Collections.newSetFromMap(new IdentityHashMap<>());
+      removedSet.addAll(removed);
+      filteredLogs.removeIf(removedSet::contains);
+    }
+    return true;
   }
 
   /**

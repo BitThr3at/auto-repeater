@@ -2,12 +2,15 @@ package burp.Filter;
 
 import burp.AutoRepeater;
 import burp.BurpExtender;
+import burp.Conditions.Condition;
 import burp.Logs.LogEntry;
 import burp.Logs.LogManager;
 import burp.Utils.Utils;
 import java.awt.Color;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 import javax.swing.ButtonGroup;
 import javax.swing.DefaultComboBoxModel;
 import javax.swing.JButton;
@@ -78,6 +81,43 @@ public class Filters {
   }
 
   public boolean isWhitelist() { return isWhitelist; }
+
+  /**
+   * Adds a filter that drops every entry for the given endpoint (scheme, host and path; any query
+   * string is ignored). A whitelist needs an "And ... Does Not Match" filter to exclude something,
+   * a blacklist an "Or ... Matches" one.
+   */
+  public void excludeEndpoint(String endpoint) {
+    String regex = Pattern.quote(endpoint) + "(\\?.*)?";
+    Filter filter = isWhitelist
+        ? new Filter("And", "Modified", "URL", "Does Not Match", regex)
+        : new Filter("Or", "Modified", "URL", "Matches", regex);
+    filterTableModel.add(filter);
+    filterTableModel.fireTableDataChanged();
+  }
+
+  /**
+   * Checked before a filter is created/updated: a bad regex is already handled gracefully at
+   * match time, but silently adding a filter that can never match is poor feedback.
+   */
+  private boolean validateMatchCondition() {
+    String matchType = (String) matchTypeComboBox.getSelectedItem();
+    String matchRelationship = (String) matchRelationshipComboBox.getSelectedItem();
+    if (!Condition.matchConditionIsRegex(matchType, matchRelationship)) {
+      return true;
+    }
+    try {
+      Pattern.compile(matchFilterTextField.getText());
+      return true;
+    } catch (PatternSyntaxException e) {
+      JOptionPane.showMessageDialog(
+          BurpExtender.getParentTabbedPane(),
+          "Invalid regex in Match Condition: " + e.getMessage(),
+          "Invalid Match Condition",
+          JOptionPane.ERROR_MESSAGE);
+      return false;
+    }
+  }
 
   private void createUI() {
     GridBagConstraints c;
@@ -156,13 +196,19 @@ public class Filters {
     addFilterButton.setMaximumSize(AutoRepeater.buttonDimension);
 
     addFilterButton.addActionListener(e -> {
-      int result = JOptionPane.showConfirmDialog(
-          BurpExtender.getParentTabbedPane(),
-          filterPanel,
-          "Add Filter",
-          JOptionPane.OK_CANCEL_OPTION,
-          JOptionPane.PLAIN_MESSAGE);
-      if (result == JOptionPane.OK_OPTION) {
+      while (true) {
+        int result = JOptionPane.showConfirmDialog(
+            BurpExtender.getParentTabbedPane(),
+            filterPanel,
+            "Add Filter",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.PLAIN_MESSAGE);
+        if (result != JOptionPane.OK_OPTION) {
+          break;
+        }
+        if (!validateMatchCondition()) {
+          continue;
+        }
         Filter newFilter = new Filter(
             (String) booleanOperatorComboBox.getSelectedItem(),
             (String) originalOrModifiedComboBox.getSelectedItem(),
@@ -172,6 +218,7 @@ public class Filters {
         );
         filterTableModel.add(newFilter);
         filterTableModel.fireTableDataChanged();
+        break;
       }
       resetFilterDialog();
     });
@@ -191,13 +238,19 @@ public class Filters {
         matchRelationshipComboBox.setSelectedItem(tempFilter.getMatchRelationship());
         matchFilterTextField.setText(tempFilter.getMatchCondition());
 
-        int result = JOptionPane.showConfirmDialog(
-            BurpExtender.getParentTabbedPane(),
-            filterPanel,
-            "Edit Filter",
-            JOptionPane.OK_CANCEL_OPTION,
-            JOptionPane.PLAIN_MESSAGE);
-        if (result == JOptionPane.OK_OPTION) {
+        while (true) {
+          int result = JOptionPane.showConfirmDialog(
+              BurpExtender.getParentTabbedPane(),
+              filterPanel,
+              "Edit Filter",
+              JOptionPane.OK_CANCEL_OPTION,
+              JOptionPane.PLAIN_MESSAGE);
+          if (result != JOptionPane.OK_OPTION) {
+            break;
+          }
+          if (!validateMatchCondition()) {
+            continue;
+          }
           Filter newFilter = new Filter(
               (String) booleanOperatorComboBox.getSelectedItem(),
               (String) originalOrModifiedComboBox.getSelectedItem(),
@@ -209,6 +262,7 @@ public class Filters {
 
           filterTableModel.update(selectedRow, newFilter);
           filterTableModel.fireTableDataChanged();
+          break;
         }
         resetFilterDialog();
       }

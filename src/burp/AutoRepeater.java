@@ -23,15 +23,21 @@ import burp.Utils.HttpComparer;
 import burp.Utils.StyledDiffDocument;
 import burp.Utils.Utils;
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.JsonSyntaxException;
 
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.io.File;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -314,6 +320,77 @@ public class AutoRepeater implements IMessageEditorController {
     setDefaultFilters();
   }
 
+  /** Prompts for a file and writes the current configuration to it as pretty-printed JSON. */
+  private void exportConfiguration() {
+    JFileChooser fileChooser = new JFileChooser();
+    fileChooser.setDialogTitle("Export AutoRepeater Configuration");
+    fileChooser.setSelectedFile(new File("autorepeater-config.json"));
+    int result = fileChooser.showSaveDialog(getUI());
+    if (result != JFileChooser.APPROVE_OPTION) {
+      return;
+    }
+    File file = fileChooser.getSelectedFile();
+    String json = new GsonBuilder().setPrettyPrinting().create().toJson(toJson());
+    try {
+      Files.write(file.toPath(), json.getBytes(StandardCharsets.UTF_8));
+      JOptionPane.showMessageDialog(getUI(),
+          "Configuration exported to " + file.getAbsolutePath(),
+          "Export Config", JOptionPane.INFORMATION_MESSAGE);
+    } catch (IOException e) {
+      JOptionPane.showMessageDialog(getUI(),
+          "Failed to write configuration: " + e.getMessage(),
+          "Export Config", JOptionPane.ERROR_MESSAGE);
+    }
+  }
+
+  /**
+   * Prompts for a file and replaces the current configuration with the one in it. Confirms first
+   * since this discards whatever replacements, conditions, filters and highlighters are set up.
+   */
+  private void importConfiguration() {
+    JFileChooser fileChooser = new JFileChooser();
+    fileChooser.setDialogTitle("Import AutoRepeater Configuration");
+    int result = fileChooser.showOpenDialog(getUI());
+    if (result != JFileChooser.APPROVE_OPTION) {
+      return;
+    }
+    File file = fileChooser.getSelectedFile();
+    String json;
+    try {
+      json = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+    } catch (IOException e) {
+      JOptionPane.showMessageDialog(getUI(),
+          "Failed to read configuration: " + e.getMessage(),
+          "Import Config", JOptionPane.ERROR_MESSAGE);
+      return;
+    }
+    JsonObject configurationJson;
+    try {
+      JsonElement parsed = new JsonParser().parse(json);
+      // Accept the legacy one-tab-per-element array format as well as a plain object.
+      if (parsed.isJsonArray()) {
+        if (parsed.getAsJsonArray().size() == 0) {
+          throw new JsonSyntaxException("configuration array is empty");
+        }
+        configurationJson = parsed.getAsJsonArray().get(0).getAsJsonObject();
+      } else {
+        configurationJson = parsed.getAsJsonObject();
+      }
+    } catch (JsonSyntaxException | IllegalStateException e) {
+      JOptionPane.showMessageDialog(getUI(),
+          "Not a valid AutoRepeater configuration file: " + e.getMessage(),
+          "Import Config", JOptionPane.ERROR_MESSAGE);
+      return;
+    }
+    int confirm = JOptionPane.showConfirmDialog(getUI(),
+        "This will replace the current replacements, conditions, filters and highlighters. Continue?",
+        "Import Config", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+    if (confirm != JOptionPane.YES_OPTION) {
+      return;
+    }
+    loadConfiguration(configurationJson);
+  }
+
   public JsonObject toJson() {
     JsonObject autoRepeaterJson = new JsonObject();
     // Add Static Properties
@@ -395,9 +472,19 @@ public class AutoRepeater implements IMessageEditorController {
         "When active, every message matching the conditions below is replayed with the replacements applied");
     activatedStatusLabel.setFont(Utils.getHeaderFont(activatedStatusLabel.getFont()));
 
+    JButton exportConfigButton = new JButton("Export Config");
+    exportConfigButton.setToolTipText("Save the current configuration (replacements, conditions, filters, highlighters) to a file");
+    exportConfigButton.addActionListener(e -> exportConfiguration());
+
+    JButton importConfigButton = new JButton("Import Config");
+    importConfigButton.setToolTipText("Replace the current configuration with one loaded from a file");
+    importConfigButton.addActionListener(e -> importConfiguration());
+
     activatedPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
     activatedPanel.add(activatedButton);
     activatedPanel.add(activatedStatusLabel);
+    activatedPanel.add(exportConfigButton);
+    activatedPanel.add(importConfigButton);
 
     configurationPane = new JPanel();
     configurationPane.setLayout(new BorderLayout());
@@ -997,6 +1084,15 @@ public class AutoRepeater implements IMessageEditorController {
     JButton clearLogButton = new JButton("Clear");
     clearLogButton.setToolTipText("Remove every logged request from this tab");
     clearLogButton.addActionListener(e -> {
+      if (logManager.getLogTableModel().getLogCount() == 0) {
+        return;
+      }
+      int confirm = JOptionPane.showConfirmDialog(getUI(),
+          "This will permanently remove every logged request from this tab. Continue?",
+          "Clear Logs", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+      if (confirm != JOptionPane.YES_OPTION) {
+        return;
+      }
       logManager.getLogTableModel().clearLogs();
       updateLogCountLabel();
     });
@@ -1132,7 +1228,7 @@ public class AutoRepeater implements IMessageEditorController {
           final int row = convertRowIndexToModel(viewRow);
           final int col = convertColumnIndexToModel(viewColumn);
           getSelectionModel().setSelectionInterval(viewRow, viewRow);
-          new LogEntryMenu(logManager, LogTable.this, row, col)
+          new LogEntryMenu(logManager, filters, LogTable.this, row, col)
               .show(e.getComponent(), e.getX(), e.getY());
         }
       });

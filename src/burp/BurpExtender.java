@@ -13,7 +13,6 @@ import java.awt.event.*;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -31,9 +30,8 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
   private static AutoRepeaterMenu autoRepeaterMenu;
   private ExecutorService executor;
 
-  // The single, global AutoRepeater. Kept in a list because Burp's HTTP threads iterate it.
+  // The single, global AutoRepeater.
   private static AutoRepeater autoRepeater;
-  private static CopyOnWriteArrayList<AutoRepeater> autoRepeaters;
 
   @Override
   public void registerExtenderCallbacks(final IBurpExtenderCallbacks callbacks) {
@@ -44,7 +42,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
     // Gson for serialization
     BurpExtender.gson = new Gson();
     //BurpExtender.gson = new GsonBuilder().setPrettyPrinting().create();
-    autoRepeaters = new CopyOnWriteArrayList<>();
     // Bounded queue with CallerRuns: under heavy proxy traffic an unbounded queue just grows until
     // the extension runs out of memory. Blocking the submitting thread throttles instead.
     ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(
@@ -155,9 +152,7 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
   }
 
   private static void setAutoRepeater(AutoRepeater newAutoRepeater) {
-    autoRepeaters.clear();
     autoRepeater = newAutoRepeater;
-    autoRepeaters.add(newAutoRepeater);
   }
 
   public static void highlightTab() {
@@ -199,17 +194,15 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
     if (messageIsRequest || toolFlag == IBurpExtenderCallbacks.TOOL_EXTENDER) {
       return;
     }
-    for (AutoRepeater autoRepeater : autoRepeaters) {
-      // Checked here as well so a deactivated tab costs nothing on Burp's HTTP threads.
-      if (!autoRepeater.isActivated()) {
-        continue;
-      }
-      executor.submit(
-          () -> autoRepeater.modifyAndSendRequestAndLog(
-              toolFlag,
-              messageInfo)
-      );
+    // Checked here as well so a deactivated extension costs nothing on Burp's HTTP threads.
+    if (!autoRepeater.isActivated()) {
+      return;
     }
+    executor.submit(
+        () -> autoRepeater.modifyAndSendRequestAndLog(
+            toolFlag,
+            messageInfo)
+    );
   }
 
   public static AutoRepeater getAutoRepeater() {
@@ -222,10 +215,6 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
 
   public static IExtensionHelpers getHelpers() {
     return helpers;
-  }
-
-  public static List<AutoRepeater> getAutoRepeaters() {
-    return autoRepeaters;
   }
 
   public static Gson getGson() {
@@ -250,13 +239,9 @@ public class BurpExtender implements IBurpExtender, ITab, IHttpListener, IContex
           } else {
             tempRequestResponse = requestResponse;
           }
-          executor.submit(() -> {
-            for (AutoRepeater autoRepeater : autoRepeaters) {
-              autoRepeater.modifyAndSendRequestAndLog(
-                toolFlag,
-                tempRequestResponse);
-            }
-          });
+          executor.submit(() -> autoRepeater.modifyAndSendRequestAndLog(
+              toolFlag,
+              tempRequestResponse));
         }
       }
     }).start();

@@ -2,11 +2,14 @@ package burp.Logs;
 
 import burp.AutoRepeater.LogTable;
 import burp.BurpExtender;
+import burp.Filter.Filters;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
+import java.net.URL;
 import javax.swing.AbstractAction;
 import javax.swing.JMenuItem;
+import javax.swing.JOptionPane;
 import javax.swing.JPopupMenu;
 
 /**
@@ -17,8 +20,8 @@ import javax.swing.JPopupMenu;
  */
 public class LogEntryMenu extends JPopupMenu {
 
-  public LogEntryMenu(final LogManager logManager, final LogTable logTable, final int row,
-      final int col) {
+  public LogEntryMenu(final LogManager logManager, final Filters filters, final LogTable logTable,
+      final int row, final int col) {
     final LogTableModel logTableModel = logManager.getLogTableModel();
     final LogEntry entry = logTableModel.getLogEntry(row);
     final String columnName = logTableModel.getColumnName(col);
@@ -52,9 +55,25 @@ public class LogEntryMenu extends JPopupMenu {
 
     addSeparator();
 
+    final URL url = entry.getModifiedURL();
+    JMenuItem filterOut = new JMenuItem(new AbstractAction("Filter out this endpoint") {
+      @Override
+      public void actionPerformed(ActionEvent actionEvent) {
+        filters.excludeEndpoint(url.getProtocol() + "://" + url.getAuthority() + url.getPath());
+      }
+    });
+    filterOut.setEnabled(url != null);
+    add(filterOut);
+
     add(new JMenuItem(new AbstractAction("Clear Logs") {
       @Override
       public void actionPerformed(ActionEvent actionEvent) {
+        int confirm = JOptionPane.showConfirmDialog(logTable,
+            "This will permanently remove every logged request from this tab. Continue?",
+            "Clear Logs", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (confirm != JOptionPane.YES_OPTION) {
+          return;
+        }
         logTableModel.clearLogs();
         logTable.revalidate();
       }

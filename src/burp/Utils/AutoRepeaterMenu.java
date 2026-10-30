@@ -16,7 +16,6 @@ import java.util.ArrayList;
 
 public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
   private final JRootPane rootPane;
-  private static java.util.List<AutoRepeater> autoRepeaters;
 
   private static JMenu autoRepeaterJMenu;
   public static boolean sendRequestsToPassiveScanner;
@@ -24,7 +23,6 @@ public class AutoRepeaterMenu implements Runnable, IExtensionStateListener {
 
   public AutoRepeaterMenu(JRootPane rootPane) {
     this.rootPane = rootPane;
-    autoRepeaters = BurpExtender.getAutoRepeaters();
     BurpExtender.getCallbacks().registerExtensionStateListener(this);
   }
 

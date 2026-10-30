@@ -6,6 +6,8 @@ import burp.Utils.Utils;
 import java.awt.Color;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 import javax.swing.DefaultComboBoxModel;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
@@ -47,6 +49,29 @@ public class Conditions {
 
   public ConditionTableModel getConditionTableModel() { return conditionTableModel; }
   public JPanel getUI() { return conditionsPanel; }
+
+  /**
+   * Checked before a condition is created/updated: a bad regex is already handled gracefully at
+   * match time, but silently adding a condition that can never match is poor feedback.
+   */
+  private boolean validateMatchCondition() {
+    String matchType = (String) matchTypeComboBox.getSelectedItem();
+    String matchRelationship = (String) matchRelationshipComboBox.getSelectedItem();
+    if (!Condition.matchConditionIsRegex(matchType, matchRelationship)) {
+      return true;
+    }
+    try {
+      Pattern.compile(matchConditionTextField.getText());
+      return true;
+    } catch (PatternSyntaxException e) {
+      JOptionPane.showMessageDialog(
+          BurpExtender.getParentTabbedPane(),
+          "Invalid regex in Match Condition: " + e.getMessage(),
+          "Invalid Match Condition",
+          JOptionPane.ERROR_MESSAGE);
+      return false;
+    }
+  }
 
   private void resetConditionDialog() {
     booleanOperatorComboBox.setSelectedIndex(0);
@@ -118,13 +143,19 @@ public class Conditions {
     addConditionButton.setMaximumSize(AutoRepeater.buttonDimension);
 
     addConditionButton.addActionListener(e -> {
-      int result = JOptionPane.showConfirmDialog(
-          BurpExtender.getParentTabbedPane(),
-          conditionPanel,
-          "Add Condition",
-          JOptionPane.OK_CANCEL_OPTION,
-          JOptionPane.PLAIN_MESSAGE);
-      if (result == JOptionPane.OK_OPTION) {
+      while (true) {
+        int result = JOptionPane.showConfirmDialog(
+            BurpExtender.getParentTabbedPane(),
+            conditionPanel,
+            "Add Condition",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.PLAIN_MESSAGE);
+        if (result != JOptionPane.OK_OPTION) {
+          break;
+        }
+        if (!validateMatchCondition()) {
+          continue;
+        }
         Condition newCondition = new Condition(
             (String) booleanOperatorComboBox.getSelectedItem(),
             (String) matchTypeComboBox.getSelectedItem(),
@@ -133,6 +164,7 @@ public class Conditions {
         );
         conditionTableModel.add(newCondition);
         conditionTableModel.fireTableDataChanged();
+        break;
       }
       resetConditionDialog();
     });
@@ -152,13 +184,19 @@ public class Conditions {
         matchRelationshipComboBox.setSelectedItem(tempCondition.getMatchRelationship());
         matchConditionTextField.setText(tempCondition.getMatchCondition());
 
-        int result = JOptionPane.showConfirmDialog(
-            BurpExtender.getParentTabbedPane(),
-            conditionPanel,
-            "Edit Condition",
-            JOptionPane.OK_CANCEL_OPTION,
-            JOptionPane.PLAIN_MESSAGE);
-        if (result == JOptionPane.OK_OPTION) {
+        while (true) {
+          int result = JOptionPane.showConfirmDialog(
+              BurpExtender.getParentTabbedPane(),
+              conditionPanel,
+              "Edit Condition",
+              JOptionPane.OK_CANCEL_OPTION,
+              JOptionPane.PLAIN_MESSAGE);
+          if (result != JOptionPane.OK_OPTION) {
+            break;
+          }
+          if (!validateMatchCondition()) {
+            continue;
+          }
           Condition newCondition = new Condition(
               (String) booleanOperatorComboBox.getSelectedItem(),
               (String) matchTypeComboBox.getSelectedItem(),
@@ -168,6 +206,7 @@ public class Conditions {
           newCondition.setEnabled(tempCondition.isEnabled());
           conditionTableModel.update(selectedRow, newCondition);
           conditionTableModel.fireTableDataChanged();
+          break;
         }
         resetConditionDialog();
       }
